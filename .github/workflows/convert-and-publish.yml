@@ -246,14 +246,14 @@ jobs:
             echo "Searching for CAD files in $repo..."
             
             # Common paths to check for CAD files
-            paths_to_check=("" "hardware" "3d" "models" "cad" "mechanical" "pcb")
+            paths_to_check=("" "chassis" "third-party" "mechanical" "3d" "models" "cad" "hardware" "pcb")
             
             found_files=false
             
             for path in "${paths_to_check[@]}"; do
                 # Get directory contents
                 api_url="https://api.github.com/repos/$repo/contents/$path"
-                files=$(curl -s "$api_url" 2>/dev/null | jq -r '.[] | select(.type == "file") | select(.name | test("\\.(step|stp|stl|obj|iges|igs|wrl)$"; "i")) | .download_url' 2>/dev/null || echo "")
+                files=$(curl -s "$api_url" 2>/dev/null | jq -r '.[] | select(.type == "file") | select(.name | test("\\.(step|stp|stl|obj|iges|igs|wrl|f3d|dwg)$"; "i")) | .download_url' 2>/dev/null || echo "")
                 
                 if [[ -n "$files" ]]; then
                     echo "Found CAD files in $path/"
