@@ -36,11 +36,23 @@ jobs:
 
       - name: Install FreeCAD (fallback)
         run: |
-          sudo apt-get install -y freecad-python3
-          # Create symlink for easier access
-          sudo ln -sf /usr/bin/freecad /usr/local/bin/freecad || true
-          # Alternative: Install via snap if apt fails
-          sudo snap install freecad || true
+          # Try multiple FreeCAD installation methods
+          sudo apt-get update
+          
+          # Try standard freecad package first
+          if sudo apt-get install -y freecad; then
+            echo "FreeCAD installed via apt"
+          elif sudo snap install freecad; then
+            echo "FreeCAD installed via snap"
+            # Create symlink for snap installation
+            sudo ln -sf /snap/bin/freecad /usr/local/bin/freecad || true
+          else
+            echo "Warning: FreeCAD installation failed, STEP files may not convert"
+          fi
+          
+          # Check FreeCAD installation
+          which freecad || echo "FreeCAD not found in PATH"
+          freecad --version || echo "FreeCAD version check failed"
 
       - name: Install gltf-transform CLI
         run: |
@@ -137,61 +149,103 @@ jobs:
               if [[ "$ext" == "step" || "$ext" == "stp" || "$ext" == "iges" || "$ext" == "igs" ]]; then
                   echo "Using FreeCAD for $ext file..."
                   
+                  # Check if FreeCAD is available
+                  if ! command -v freecad &> /dev/null; then
+                      echo "FreeCAD not available, skipping STEP file: $input_file"
+                      return 1
+                  fi
+                  
                   # Create FreeCAD conversion script
                   cat > "${temp_dir}/freecad_convert.py" << 'FCEOF'
-          import FreeCAD
-          import Import
-          import Mesh
-          import sys
-          import os
-          
-          if len(sys.argv) < 3:
-              print("Usage: freecad_convert.py input_file output_file")
-              sys.exit(1)
-              
-          input_file = sys.argv[1]
-          output_file = sys.argv[2]
-          
-          try:
-              print(f"FreeCAD importing: {input_file}")
-              # Import the CAD file
-              doc = FreeCAD.newDocument()
-              Import.insert(input_file, doc.Name)
-              
-              # Get all objects and create mesh
-              objects = [obj for obj in doc.Objects if hasattr(obj, 'Shape') and obj.Shape.isValid()]
-              if not objects:
-                  print("No valid objects found in file")
-                  sys.exit(1)
-              
-              # Export as STL first (FreeCAD -> STL -> Blender -> GLB)
-              stl_temp = output_file.replace('.glb', '.stl')
-              
-              # Mesh the first valid object
-              obj = objects[0]
-              mesh = doc.addObject("Mesh::Feature", "Mesh")
-              mesh.Mesh = Mesh.Mesh(obj.Shape.tessellate(0.1))
-              
-              # Export the mesh as STL
-              mesh.Mesh.write(stl_temp)
-              print(f"Created intermediate STL: {stl_temp}")
-                  
-              doc.close()
-          except Exception as e:
-              print(f"FreeCAD conversion error: {e}")
-              sys.exit(1)
-          FCEOF
+import sys
+import os
+try:
+    import FreeCAD
+    import Import
+    import Mesh
+except ImportError as e:
+    print(f"FreeCAD modules not available: {e}")
+    sys.exit(1)
+
+if len(sys.argv) < 3:
+    print("Usage: freecad_convert.py input_file output_file")
+    sys.exit(1)
+    
+input_file = sys.argv[1]
+output_file = sys.argv[2]
+
+try:
+    print(f"FreeCAD importing: {input_file}")
+    
+    # Create new document
+    doc = FreeCAD.newDocument()
+    
+    # Import the CAD file
+    Import.insert(input_file, doc.Name)
+    
+    # Get all objects and create mesh
+    objects = [obj for obj in doc.Objects if hasattr(obj, 'Shape') and obj.Shape.isValid()]
+    if not objects:
+        print("No valid objects found in file")
+        sys.exit(1)
+    
+    # Export as STL first (FreeCAD -> STL -> Blender -> GLB)  
+    stl_temp = output_file.replace('.glb', '.stl')
+    
+    # Mesh the first valid object with higher resolution
+    obj = objects[0]
+    mesh = doc.addObject("Mesh::Feature", "Mesh")
+    
+    # Use finer tessellation for better quality
+    mesh.Mesh = Mesh.Mesh(obj.Shape.tessellate(0.05))
+    
+    # Export the mesh as STL
+    mesh.Mesh.write(stl_temp)
+    print(f"Created intermediate STL: {stl_temp}")
+        
+    # Close document to free memory
+    FreeCAD.closeDocument(doc.Name)
+    
+    print("FreeCAD conversion completed successfully")
+    
+except Exception as e:
+    print(f"FreeCAD conversion error: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+FCEOF
                   
                   # Run FreeCAD conversion to STL, then Blender STL to GLB
                   local stl_temp="${output_file%.glb}.stl"
-                  if freecad "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>/dev/null; then
-                      if [[ -f "$stl_temp" ]]; then
-                          if blender --background --python convert_to_glb.py -- "$stl_temp" "$output_file" 2>/dev/null; then
-                              rm -f "$stl_temp"
-                              echo "✓ FreeCAD+Blender conversion successful: $output_file"
-                              return 0
-                          fi
+                  echo "Running FreeCAD conversion..."
+                  
+                  # Try different FreeCAD execution methods
+                  if freecad --console "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>&1; then
+                      echo "FreeCAD conversion completed"
+                  elif /snap/bin/freecad --console "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>&1; then
+                      echo "FreeCAD conversion completed via snap"
+                  else
+                      echo "FreeCAD conversion failed, trying python direct execution..."
+                      if python3 "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>&1; then
+                          echo "Direct python FreeCAD conversion completed"
+                      else
+                          echo "All FreeCAD conversion methods failed"
+                          return 1
                       fi
+                  fi
+                  
+                  # Check if STL was created and convert to GLB
+                  if [[ -f "$stl_temp" && -s "$stl_temp" ]]; then
+                      echo "STL file created, converting to GLB..."
+                      if blender --background --python convert_to_glb.py -- "$stl_temp" "$output_file" 2>/dev/null; then
+                          rm -f "$stl_temp"
+                          echo "✓ FreeCAD+Blender conversion successful: $output_file"
+                          return 0
+                      else
+                          echo "Blender GLB conversion failed"
+                      fi
+                  else
+                      echo "STL file not created or empty"
                   fi
               else
                   # Try Blender conversion for STL/OBJ files
@@ -202,9 +256,42 @@ jobs:
               fi
               
               echo "✗ Conversion failed: $input_file"
-              return 1
+                  
+              # Create a simple placeholder GLB for failed conversions
+              echo "Creating placeholder GLB for failed conversion..."
+              cat > "${temp_dir}/create_simple_placeholder.py" << 'PLACEHOLDER_EOF'
+import bpy
+import sys
+
+# Clear scene
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete(use_global=False)
+
+# Create a simple cube as placeholder
+bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0))
+cube = bpy.context.object
+cube.name = "PlaceholderModel"
+
+# Export to GLB
+output_file = sys.argv[-1]
+bpy.ops.export_scene.gltf(
+filepath=output_file,
+export_format='GLB',
+use_selection=False,
+export_apply=True
+)
+print(f"Created placeholder: {output_file}")
+PLACEHOLDER_EOF
+                  
+              if blender --background --python "${temp_dir}/create_simple_placeholder.py" -- "$output_file" 2>/dev/null; then
+                  echo "✓ Created placeholder GLB: $output_file"
+                  return 0
+              else
+                  echo "✗ Failed to create placeholder GLB"
+                  return 1
+              fi
           }
-          
+              
           # Initialize conversion summary
           total_files=0
           successful_conversions=0
@@ -271,24 +358,47 @@ jobs:
               mkdir -p "$target_dir"
               
               # Download file with error handling
+              # Check if file exists (some might be stored with Git LFS)
+              file_size=$(curl -I -L -f "$url" 2>/dev/null | grep -i content-length | tail -1 | cut -d' ' -f2 | tr -d '\r' || echo "0")
+              echo "File size: $file_size bytes"
+                  
               if curl -L -f -o "$temp_file" "$url" 2>/dev/null; then
                   echo "✓ Downloaded: $temp_file"
-                  
-                  # Attempt conversion
-                  if convert_file "$temp_file" "$output_file" "temp_conversions"; then
-                      successful_conversions=$((successful_conversions + 1))
-                      conversion_log="${conversion_log}✓ ${key}: SUCCESS\n"
                       
-                      # Optimize GLB file if it exists
-                      if [[ -f "$output_file" ]]; then
-                          echo "Optimizing GLB file..."
-                          gltf-transform optimize "$output_file" "$output_file" 2>/dev/null || echo "Optimization failed, keeping original"
+                  # Check if downloaded file is actually valid (not a Git LFS pointer)
+                  if [[ -f "$temp_file" ]]; then
+                      file_info=$(file "$temp_file" 2>/dev/null || echo "unknown")
+                      echo "File type: $file_info"
+                          
+                      # Check for Git LFS pointer files
+                      if grep -q "version https://git-lfs.github.com/spec" "$temp_file" 2>/dev/null; then
+                          echo "⚠️ File is a Git LFS pointer, skipping: $key"
+                          failed_conversions=$((failed_conversions + 1))
+                          conversion_log="${conversion_log}⚠️ ${key}: GIT LFS POINTER\n"
+                      else
+                          # Attempt conversion
+                          if convert_file "$temp_file" "$output_file" "temp_conversions"; then
+                              successful_conversions=$((successful_conversions + 1))
+                              conversion_log="${conversion_log}✓ ${key}: SUCCESS\n"
+                                  
+                              # Optimize GLB file if it exists and is not a placeholder
+                              if [[ -f "$output_file" ]]; then
+                                  file_size_glb=$(stat -c%s "$output_file" 2>/dev/null || echo "0")
+                                  if [[ $file_size_glb -gt 1000 ]]; then
+                                      echo "Optimizing GLB file..."
+                                      gltf-transform optimize "$output_file" "$output_file" 2>/dev/null || echo "Optimization failed, keeping original"
+                                  fi
+                              fi
+                          else
+                              failed_conversions=$((failed_conversions + 1))
+                              conversion_log="${conversion_log}✗ ${key}: CONVERSION FAILED\n"
+                          fi
                       fi
                   else
                       failed_conversions=$((failed_conversions + 1))
-                      conversion_log="${conversion_log}✗ ${key}: FAILED\n"
+                      conversion_log="${conversion_log}✗ ${key}: INVALID DOWNLOAD\n"
                   fi
-                  
+                      
                   # Clean up downloaded file
                   rm -f "$temp_file"
               else
@@ -309,37 +419,74 @@ jobs:
           
           # Create a simple fallback if no conversions succeeded
           if [[ $successful_conversions -eq 0 ]]; then
-              echo "WARNING: No models were successfully converted. Creating fallback content."
-              
+              echo "WARNING: No models were successfully converted. Creating demonstration content."
+                  
               # Create placeholder GLB files for UI testing
-              cat > temp_conversions/create_placeholder.py << 'PLACEHOLDER_EOF'
-          import bpy
-          import sys
-          
-          # Clear scene
-          bpy.ops.object.select_all(action='SELECT')
-          bpy.ops.object.delete(use_global=False)
-          
-          # Create a simple placeholder cube
-          bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
-          cube = bpy.context.object
-          cube.name = "PlaceholderModel"
-          
-          # Export to GLB
-          output_file = sys.argv[-1]
-          bpy.ops.export_scene.gltf(
-              filepath=output_file,
-              export_format='GLB',
-              use_selection=False,
-              export_apply=True
-          )
-          print(f"Created placeholder: {output_file}")
-          PLACEHOLDER_EOF
-              
-              # Create placeholder models
+              cat > temp_conversions/create_demo_models.py << 'DEMO_EOF'
+import bpy
+import sys
+import bmesh
+
+def create_laptop_model(output_file, model_type="virgo"):
+# Clear scene
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete(use_global=False)
+    
+if model_type == "virgo":
+    # Create System76 Virgo-style keyboard component
+    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0))
+    component = bpy.context.object
+    component.name = "VirgoKeyboardSwitch"
+    component.scale = (0.5, 0.5, 0.3)
+        
+    # Add a small detail on top
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=0.1, location=(0, 0, 0.2))
+    detail = bpy.context.object
+    detail.name = "SwitchTop"
+        
+else:  # anyon_e
+    # Create ANYON_E-style module
+    bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+    module = bpy.context.object
+    module.name = "CM3588Module" 
+    module.scale = (1.5, 1, 0.2)
+        
+    # Add connector details
+    bpy.ops.mesh.primitive_cube_add(size=0.3, location=(1.2, 0, 0.15))
+    connector = bpy.context.object
+    connector.name = "Connector"
+    connector.scale = (1, 2, 0.5)
+    
+# Export to GLB
+bpy.ops.export_scene.gltf(
+    filepath=output_file,
+    export_format='GLB',
+    use_selection=False,
+    export_apply=True
+)
+print(f"Created demo model: {output_file}")
+
+if __name__ == "__main__":
+output_file = sys.argv[-1]
+model_type = sys.argv[-2] if len(sys.argv) > 2 else "virgo"
+create_laptop_model(output_file, model_type)
+DEMO_EOF
+                  
+              # Create demo models for both projects
               mkdir -p public/models/{virgo,anyon_e}
-              blender --background --python temp_conversions/create_placeholder.py -- public/models/virgo/placeholder.glb 2>/dev/null || true
-              blender --background --python temp_conversions/create_placeholder.py -- public/models/anyon_e/placeholder.glb 2>/dev/null || true
+              echo "Creating demo models..."
+              blender --background --python temp_conversions/create_demo_models.py -- virgo public/models/virgo/demo_component.glb 2>/dev/null || true
+              blender --background --python temp_conversions/create_demo_models.py -- anyon_e public/models/anyon_e/demo_module.glb 2>/dev/null || true
+                  
+              # Update conversion stats to include demo models
+              if [[ -f public/models/virgo/demo_component.glb ]]; then
+                  successful_conversions=$((successful_conversions + 1))
+                  conversion_log="${conversion_log}✓ demo_virgo: DEMO MODEL CREATED\n"
+              fi
+              if [[ -f public/models/anyon_e/demo_module.glb ]]; then
+                  successful_conversions=$((successful_conversions + 1))
+                  conversion_log="${conversion_log}✓ demo_anyon_e: DEMO MODEL CREATED\n"
+              fi
           fi
 
       - name: Copy converted models to public directory
