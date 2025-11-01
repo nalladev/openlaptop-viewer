@@ -3,7 +3,7 @@ name: Convert and Publish CAD Files
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'  # Run weekly
+    - cron: '0 0 * * 0'
 
 env:
   TARGET_REPOS: |
@@ -26,638 +26,349 @@ jobs:
 
       - name: Create output directories
         run: |
-          mkdir -p public/models/{virgo,anyon_e}
-          mkdir -p temp_downloads
+          mkdir -p public/models/virgo
+          mkdir -p public/models/anyon_e
 
       - name: Install Blender
         run: |
-          sudo apt-get update
-          sudo apt-get install -y blender
+          sudo apt update
+          sudo snap install blender --classic
 
-      - name: Install FreeCAD (fallback)
+      - name: Install FreeCAD
         run: |
-          # Try multiple FreeCAD installation methods
-          sudo apt-get update
-          
-          # Try standard freecad package first
-          if sudo apt-get install -y freecad; then
+          echo "Installing FreeCAD..."
+          if sudo apt install -y freecad; then
             echo "FreeCAD installed via apt"
-          elif sudo snap install freecad; then
-            echo "FreeCAD installed via snap"
-            # Create symlink for snap installation
-            sudo ln -sf /snap/bin/freecad /usr/local/bin/freecad || true
           else
-            echo "Warning: FreeCAD installation failed, STEP files may not convert"
+            echo "apt failed, trying snap"
+            sudo snap install freecad
           fi
-          
-          # Check FreeCAD installation
-          which freecad || echo "FreeCAD not found in PATH"
-          freecad --version || echo "FreeCAD version check failed"
+          which freecad || echo "freecad not found in PATH"
 
       - name: Install gltf-transform CLI
         run: |
           npm install -g @gltf-transform/cli
 
-      - name: Create directories
+      - name: Create conversion scripts
         run: |
-          mkdir -p public/models
-          mkdir -p temp_conversions
-
-      - name: Convert CAD files to GLB
-        shell: bash
-        run: |
-          set -euo pipefail
-          
           # Create Blender conversion script
-          cat > convert_to_glb.py << 'EOF'
+          cat > blender_convert.py << 'EOF'
           import bpy
           import sys
-          import os
           
-          # Clear default scene
           bpy.ops.object.select_all(action='SELECT')
-          bpy.ops.object.delete(use_global=False)
+          bpy.ops.object.delete()
           
-          if "--" not in sys.argv:
-              print("Error: Missing arguments")
-              sys.exit(1)
-              
-          arg_index = sys.argv.index("--")
-          if len(sys.argv) <= arg_index + 2:
-              print("Error: Missing input or output file arguments")
-              sys.exit(1)
-              
-          input_file = sys.argv[arg_index + 1]
-          output_file = sys.argv[arg_index + 2]
-          
-          print(f"Converting {input_file} to {output_file}")
+          input_file = sys.argv[-2]
+          output_file = sys.argv[-1]
           
           try:
-              # Import based on file extension
-              ext = os.path.splitext(input_file)[1].lower()
-              
-              if ext in ['.step', '.stp']:
-                  # Note: Blender doesn't natively support STEP, this will likely fail
-                  # We'll handle this in the bash script
-                  print("STEP files need FreeCAD conversion first")
-                  sys.exit(1)
-              elif ext == '.stl':
+              if input_file.lower().endswith('.stl'):
                   bpy.ops.import_mesh.stl(filepath=input_file)
-              elif ext == '.obj':
+              elif input_file.lower().endswith('.obj'):
                   bpy.ops.import_scene.obj(filepath=input_file)
-              elif ext in ['.iges', '.igs']:
-                  print("IGES files need FreeCAD conversion first")
-                  sys.exit(1)
               else:
-                  print(f"Unsupported file format: {ext}")
+                  print(f"Unsupported file type: {input_file}")
                   sys.exit(1)
               
-              # Select all imported objects
               bpy.ops.object.select_all(action='SELECT')
               
-              if not bpy.context.selected_objects:
-                  print("No objects were imported")
-                  sys.exit(1)
-              
-              # Export to GLB
               bpy.ops.export_scene.gltf(
                   filepath=output_file,
                   export_format='GLB',
                   use_selection=True,
-                  export_apply=True
+                  export_materials='EXPORT',
+                  export_colors=True,
+                  export_cameras=False,
+                  export_lights=False
               )
               
-              print(f"Successfully converted to {output_file}")
+              print(f"Successfully converted {input_file} to {output_file}")
               
           except Exception as e:
-              print(f"Error during conversion: {e}")
+              print(f"Blender conversion failed: {e}")
               sys.exit(1)
           EOF
           
-          # Function to convert a single file
-          convert_file() {
-              local input_file="$1"
-              local output_file="$2"
-              local temp_dir="$3"
-              
-              echo "Attempting to convert: $input_file -> $output_file"
-              
-              # Get file extension
-              local ext=$(echo "${input_file##*.}" | tr '[:upper:]' '[:lower:]')
-              
-              # Try FreeCAD first for STEP/IGES files
-              if [[ "$ext" == "step" || "$ext" == "stp" || "$ext" == "iges" || "$ext" == "igs" ]]; then
-                  echo "Using FreeCAD for $ext file..."
-                  
-                  # Check if FreeCAD is available
-                  if ! command -v freecad &> /dev/null; then
-                      echo "FreeCAD not available, skipping STEP file: $input_file"
-                      return 1
-                  fi
-                  
-                  # Create FreeCAD conversion script
-                  cat > "${temp_dir}/freecad_convert.py" << 'FCEOF'
-import sys
-import os
-try:
-    import FreeCAD
-    import Import
-    import Mesh
-except ImportError as e:
-    print(f"FreeCAD modules not available: {e}")
-    sys.exit(1)
-
-if len(sys.argv) < 3:
-    print("Usage: freecad_convert.py input_file output_file")
-    sys.exit(1)
-    
-input_file = sys.argv[1]
-output_file = sys.argv[2]
-
-try:
-    print(f"FreeCAD importing: {input_file}")
-    
-    # Create new document
-    doc = FreeCAD.newDocument()
-    
-    # Import the CAD file
-    Import.insert(input_file, doc.Name)
-    
-    # Get all objects and create mesh
-    objects = [obj for obj in doc.Objects if hasattr(obj, 'Shape') and obj.Shape.isValid()]
-    if not objects:
-        print("No valid objects found in file")
-        sys.exit(1)
-    
-    # Export as STL first (FreeCAD -> STL -> Blender -> GLB)  
-    stl_temp = output_file.replace('.glb', '.stl')
-    
-    # Mesh the first valid object with higher resolution
-    obj = objects[0]
-    mesh = doc.addObject("Mesh::Feature", "Mesh")
-    
-    # Use finer tessellation for better quality
-    mesh.Mesh = Mesh.Mesh(obj.Shape.tessellate(0.05))
-    
-    # Export the mesh as STL
-    mesh.Mesh.write(stl_temp)
-    print(f"Created intermediate STL: {stl_temp}")
-        
-    # Close document to free memory
-    FreeCAD.closeDocument(doc.Name)
-    
-    print("FreeCAD conversion completed successfully")
-    
-except Exception as e:
-    print(f"FreeCAD conversion error: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-FCEOF
-                  
-                  # Run FreeCAD conversion to STL, then Blender STL to GLB
-                  local stl_temp="${output_file%.glb}.stl"
-                  echo "Running FreeCAD conversion..."
-                  
-                  # Try different FreeCAD execution methods
-                  if freecad --console "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>&1; then
-                      echo "FreeCAD conversion completed"
-                  elif /snap/bin/freecad --console "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>&1; then
-                      echo "FreeCAD conversion completed via snap"
-                  else
-                      echo "FreeCAD conversion failed, trying python direct execution..."
-                      if python3 "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>&1; then
-                          echo "Direct python FreeCAD conversion completed"
-                      else
-                          echo "All FreeCAD conversion methods failed"
-                          return 1
-                      fi
-                  fi
-                  
-                  # Check if STL was created and convert to GLB
-                  if [[ -f "$stl_temp" && -s "$stl_temp" ]]; then
-                      echo "STL file created, converting to GLB..."
-                      if blender --background --python convert_to_glb.py -- "$stl_temp" "$output_file" 2>/dev/null; then
-                          rm -f "$stl_temp"
-                          echo "✓ FreeCAD+Blender conversion successful: $output_file"
-                          return 0
-                      else
-                          echo "Blender GLB conversion failed"
-                      fi
-                  else
-                      echo "STL file not created or empty"
-                  fi
-              else
-                  # Try Blender conversion for STL/OBJ files
-                  if blender --background --python convert_to_glb.py -- "$input_file" "$output_file" 2>/dev/null; then
-                      echo "✓ Blender conversion successful: $output_file"
-                      return 0
-                  fi
-              fi
-              
-              echo "✗ Conversion failed: $input_file"
-                  
-              # Create a simple placeholder GLB for failed conversions
-              echo "Creating placeholder GLB for failed conversion..."
-              cat > "${temp_dir}/create_simple_placeholder.py" << 'PLACEHOLDER_EOF'
-import bpy
-import sys
-
-# Clear scene
-bpy.ops.object.select_all(action='SELECT')
-bpy.ops.object.delete(use_global=False)
-
-# Create a simple cube as placeholder
-bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0))
-cube = bpy.context.object
-cube.name = "PlaceholderModel"
-
-# Export to GLB
-output_file = sys.argv[-1]
-bpy.ops.export_scene.gltf(
-filepath=output_file,
-export_format='GLB',
-use_selection=False,
-export_apply=True
-)
-print(f"Created placeholder: {output_file}")
-PLACEHOLDER_EOF
-                  
-              if blender --background --python "${temp_dir}/create_simple_placeholder.py" -- "$output_file" 2>/dev/null; then
-                  echo "✓ Created placeholder GLB: $output_file"
-                  return 0
-              else
-                  echo "✗ Failed to create placeholder GLB"
-                  return 1
-              fi
-          }
-              
-          # Initialize conversion summary
-          total_files=0
-          successful_conversions=0
-          failed_conversions=0
-          conversion_log=""
+          # Create FreeCAD conversion script
+          cat > freecad_convert.py << 'EOF'
+          import sys
+          import os
+          try:
+              import FreeCAD
+              import Import
+              import Mesh
+          except ImportError as e:
+              print(f"FreeCAD modules not available: {e}")
+              sys.exit(1)
           
-          echo "=== STARTING 3D MODEL CONVERSIONS ==="
+          if len(sys.argv) < 3:
+              print("Usage: freecad_convert.py <input_step> <output_stl>")
+              sys.exit(1)
           
-          # Define all files to process with their metadata
-          declare -A files_to_process=(
-              # System76 Virgo - Keyboard Components
-              ["virgo_keyboard_switch"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/CPG142501DXX%20v3.step"
-              ["virgo_keycap"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/CPG142501DXX_keycap.step"
-              ["virgo_led"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/LED_1515.step"
-              ["virgo_trackpoint_nub"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/Sprintek%20Nub%20v9.step"
-              ["virgo_connector"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/c-2-1734839-4-c-3d.stp"
+          input_path = sys.argv[1]
+          output_path = sys.argv[2]
+          
+          try:
+              print(f"Loading: {input_path}")
               
-              # System76 Virgo - Motherboard Components
-              ["virgo_mb_connector"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-rpl-uph/models/1003-002-01100.stp"
-              ["virgo_ptn5110"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-rpl-uph/models/PTN5110.step"
+              doc = FreeCAD.newDocument("conversion")
+              Import.insert(input_path, doc.Name)
               
-              # Byrantech Laptop - Complete Module
-              ["anyon_e_cm3588_module_stl"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/CM3588%203D/CM3588.stl"
-              ["anyon_e_cm3588_module_obj"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/CM3588%203D/CM3588.obj"
-              ["anyon_e_cm3588_module_step"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/CM3588%203D/CM3588_3D.step"
+              objects = doc.Objects
+              print(f"Found {len(objects)} objects")
               
-              # Byrantech Laptop - Component Models
-              ["anyon_e_wifi_card"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/2230_RT8852BE.step"
-              ["anyon_e_ssd_2242"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/2242_SSD.step"
-              ["anyon_e_ssd_2280"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/2280_SSD.step"
-              ["anyon_e_board_connector"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/DF40C-100DS.stp"
-              ["anyon_e_ethernet_jack"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/LPJM4938GENL.STEP"
+              if not objects:
+                  print("No objects found in STEP file")
+                  sys.exit(1)
+              
+              mesh_objects = []
+              for obj in objects:
+                  if hasattr(obj, 'Shape') and obj.Shape:
+                      print(f"Processing object: {obj.Label}")
+                      try:
+                          mesh = doc.addObject("Mesh::Feature", "mesh_" + obj.Label)
+                          mesh.Mesh = Mesh.Mesh(obj.Shape.tessellate(0.1))
+                          mesh_objects.append(mesh)
+                      except Exception as e:
+                          print(f"Failed to mesh object {obj.Label}: {e}")
+                          continue
+              
+              if not mesh_objects:
+                  print("No meshable objects found")
+                  sys.exit(1)
+              
+              print(f"Exporting to: {output_path}")
+              mesh_objects[0].Mesh.write(output_path)
+              
+              print("Conversion successful")
+              
+          except Exception as e:
+              import traceback
+              print(f"Error during conversion: {e}")
+              traceback.print_exc()
+              sys.exit(1)
+          EOF
+
+      - name: Download and convert System76 Virgo files
+        run: |
+          echo "=== Processing System76 Virgo ==="
+          success=0
+          failure=0
+          
+          declare -A files=(
+            ["pcb-keyboard/models/CPG142501DXX v3.step"]="CPG142501DXX_v3"
+            ["pcb-keyboard/models/CPG142501DXX_keycap.step"]="CPG142501DXX_keycap"
+            ["pcb-keyboard/models/LED_1515.step"]="LED_1515"
+            ["pcb-keyboard/models/Sprintek Nub v9.step"]="Sprintek_Nub_v9"
+            ["pcb-rpl-uph/models/c-2-1734839-4-c-3d.stp"]="connector"
+            ["pcb-rpl-uph/models/1003-002-01100.stp"]="mb_connector"
+            ["pcb-rpl-uph/models/PTN5110.step"]="PTN5110"
           )
           
-          # Process each file
-          for key in "${!files_to_process[@]}"; do
-              url="${files_to_process[$key]}"
-              
-              # Determine target directory and filename
-              if [[ "$key" == virgo_* ]]; then
-                  target_dir="public/models/virgo"
-                  display_name="${key#virgo_}"
-              else
-                  target_dir="public/models/anyon_e"
-                  display_name="${key#anyon_e_}"
+          for path in "${!files[@]}"; do
+            name="${files[$path]}"
+            url="https://raw.githubusercontent.com/system76/virgo/main/${path}"
+            temp_file="/tmp/${name}.tmp"
+            output_file="public/models/virgo/${name}.glb"
+            
+            echo "Downloading: $url"
+            if curl -L -f -o "$temp_file" "$url"; then
+              size=$(stat -c%s "$temp_file")
+              if [[ $size -lt 100 ]]; then
+                echo "SKIP: File too small, likely LFS pointer"
+                rm -f "$temp_file"
+                continue
               fi
               
-              # Get file extension from URL
-              filename=$(basename "$url")
-              ext="${filename##*.}"
-              
-              # Download the file
-              temp_file="temp_downloads/${key}.${ext}"
-              output_file="${target_dir}/${display_name}.glb"
-              
-              total_files=$((total_files + 1))
-              
-              echo ""
-              echo "=== Processing: $key ==="
-              echo "URL: $url"
-              echo "Output: $output_file"
-              
-              # Create target directory
-              mkdir -p "$target_dir"
-              
-              # Download file with error handling
-              # Check if file exists (some might be stored with Git LFS)
-              file_size=$(curl -I -L -f "$url" 2>/dev/null | grep -i content-length | tail -1 | cut -d' ' -f2 | tr -d '\r' || echo "0")
-              echo "File size: $file_size bytes"
-                  
-              if curl -L -f -o "$temp_file" "$url" 2>/dev/null; then
-                  echo "✓ Downloaded: $temp_file"
-                      
-                  # Check if downloaded file is actually valid (not a Git LFS pointer)
-                  if [[ -f "$temp_file" ]]; then
-                      file_info=$(file "$temp_file" 2>/dev/null || echo "unknown")
-                      echo "File type: $file_info"
-                          
-                      # Check for Git LFS pointer files
-                      if grep -q "version https://git-lfs.github.com/spec" "$temp_file" 2>/dev/null; then
-                          echo "⚠️ File is a Git LFS pointer, skipping: $key"
-                          failed_conversions=$((failed_conversions + 1))
-                          conversion_log="${conversion_log}⚠️ ${key}: GIT LFS POINTER\n"
-                      else
-                          # Attempt conversion
-                          if convert_file "$temp_file" "$output_file" "temp_conversions"; then
-                              successful_conversions=$((successful_conversions + 1))
-                              conversion_log="${conversion_log}✓ ${key}: SUCCESS\n"
-                                  
-                              # Optimize GLB file if it exists and is not a placeholder
-                              if [[ -f "$output_file" ]]; then
-                                  file_size_glb=$(stat -c%s "$output_file" 2>/dev/null || echo "0")
-                                  if [[ $file_size_glb -gt 1000 ]]; then
-                                      echo "Optimizing GLB file..."
-                                      gltf-transform optimize "$output_file" "$output_file" 2>/dev/null || echo "Optimization failed, keeping original"
-                                  fi
-                              fi
-                          else
-                              failed_conversions=$((failed_conversions + 1))
-                              conversion_log="${conversion_log}✗ ${key}: CONVERSION FAILED\n"
-                          fi
-                      fi
+              if [[ "$path" == *.step ]] || [[ "$path" == *.stp ]]; then
+                stl_temp="/tmp/${name}.stl"
+                echo "Converting STEP to STL with FreeCAD..."
+                if freecad -c freecad_convert.py "$temp_file" "$stl_temp"; then
+                  echo "Converting STL to GLB with Blender..."
+                  if blender --background --python blender_convert.py -- "$stl_temp" "$output_file"; then
+                    echo "✅ Success: $name"
+                    ((success++))
+                    rm -f "$stl_temp"
                   else
-                      failed_conversions=$((failed_conversions + 1))
-                      conversion_log="${conversion_log}✗ ${key}: INVALID DOWNLOAD\n"
+                    echo "❌ Blender failed: $name"
+                    ((failure++))
                   fi
-                      
-                  # Clean up downloaded file
-                  rm -f "$temp_file"
-              else
-                  echo "✗ Download failed for: $url"
-                  failed_conversions=$((failed_conversions + 1))
-                  conversion_log="${conversion_log}✗ ${key}: DOWNLOAD FAILED\n"
+                else
+                  echo "❌ FreeCAD failed: $name"
+                  ((failure++))
+                fi
+              elif [[ "$path" == *.stl ]] || [[ "$path" == *.obj ]]; then
+                echo "Converting STL/OBJ to GLB with Blender..."
+                if blender --background --python blender_convert.py -- "$temp_file" "$output_file"; then
+                  echo "✅ Success: $name"
+                  ((success++))
+                else
+                  echo "❌ Failed: $name"
+                  ((failure++))
+                fi
               fi
+              
+              rm -f "$temp_file"
+            else
+              echo "❌ Download failed: $url"
+              ((failure++))
+            fi
           done
           
-          echo ""
-          echo "=== CONVERSION SUMMARY ==="
-          echo "Total files processed: $total_files"
-          echo "Successful conversions: $successful_conversions"
-          echo "Failed conversions: $failed_conversions"
-          echo ""
-          echo "=== DETAILED RESULTS ==="
-          echo -e "$conversion_log"
+          echo "Virgo results: $success success, $failure failed"
+
+      - name: Download and convert ANYON_E files
+        run: |
+          echo "=== Processing ANYON_E ==="
+          success=0
+          failure=0
           
-          # Create a simple fallback if no conversions succeeded
-          if [[ $successful_conversions -eq 0 ]]; then
-              echo "WARNING: No models were successfully converted. Creating demonstration content."
-                  
-              # Create placeholder GLB files for UI testing
-              cat > temp_conversions/create_demo_models.py << 'DEMO_EOF'
-import bpy
-import sys
-import bmesh
-
-def create_laptop_model(output_file, model_type="virgo"):
-# Clear scene
-bpy.ops.object.select_all(action='SELECT')
-bpy.ops.object.delete(use_global=False)
-    
-if model_type == "virgo":
-    # Create System76 Virgo-style keyboard component
-    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0))
-    component = bpy.context.object
-    component.name = "VirgoKeyboardSwitch"
-    component.scale = (0.5, 0.5, 0.3)
-        
-    # Add a small detail on top
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=0.1, location=(0, 0, 0.2))
-    detail = bpy.context.object
-    detail.name = "SwitchTop"
-        
-else:  # anyon_e
-    # Create ANYON_E-style module
-    bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
-    module = bpy.context.object
-    module.name = "CM3588Module" 
-    module.scale = (1.5, 1, 0.2)
-        
-    # Add connector details
-    bpy.ops.mesh.primitive_cube_add(size=0.3, location=(1.2, 0, 0.15))
-    connector = bpy.context.object
-    connector.name = "Connector"
-    connector.scale = (1, 2, 0.5)
-    
-# Export to GLB
-bpy.ops.export_scene.gltf(
-    filepath=output_file,
-    export_format='GLB',
-    use_selection=False,
-    export_apply=True
-)
-print(f"Created demo model: {output_file}")
-
-if __name__ == "__main__":
-output_file = sys.argv[-1]
-model_type = sys.argv[-2] if len(sys.argv) > 2 else "virgo"
-create_laptop_model(output_file, model_type)
-DEMO_EOF
-                  
-              # Create demo models for both projects
-              mkdir -p public/models/{virgo,anyon_e}
-              echo "Creating demo models..."
-              blender --background --python temp_conversions/create_demo_models.py -- virgo public/models/virgo/demo_component.glb 2>/dev/null || true
-              blender --background --python temp_conversions/create_demo_models.py -- anyon_e public/models/anyon_e/demo_module.glb 2>/dev/null || true
-                  
-              # Update conversion stats to include demo models
-              if [[ -f public/models/virgo/demo_component.glb ]]; then
-                  successful_conversions=$((successful_conversions + 1))
-                  conversion_log="${conversion_log}✓ demo_virgo: DEMO MODEL CREATED\n"
+          declare -A files=(
+            ["motherboard/CM3588 3D/CM3588.stl"]="CM3588"
+            ["motherboard/CM3588 3D/CM3588.obj"]="CM3588_obj"
+            ["motherboard/CM3588 3D/CM3588_3D.step"]="CM3588_3D"
+            ["library/2230_RT8852BE.step"]="wifi_card"
+            ["library/2242_SSD.step"]="ssd_2242"
+            ["library/2280_SSD.step"]="ssd_2280"
+            ["library/DF40C-100DS.stp"]="board_connector"
+            ["library/LPJM4938GENL.STEP"]="ethernet_jack"
+          )
+          
+          for path in "${!files[@]}"; do
+            name="${files[$path]}"
+            url="https://raw.githubusercontent.com/byrantech/laptop/main/${path}"
+            temp_file="/tmp/${name}.tmp"
+            output_file="public/models/anyon_e/${name}.glb"
+            
+            echo "Downloading: $url"
+            if curl -L -f -o "$temp_file" "$url"; then
+              size=$(stat -c%s "$temp_file")
+              if [[ $size -lt 100 ]]; then
+                echo "SKIP: File too small, likely LFS pointer"
+                rm -f "$temp_file"
+                continue
               fi
-              if [[ -f public/models/anyon_e/demo_module.glb ]]; then
-                  successful_conversions=$((successful_conversions + 1))
-                  conversion_log="${conversion_log}✓ demo_anyon_e: DEMO MODEL CREATED\n"
+              
+              if [[ "$path" == *.step ]] || [[ "$path" == *.stp ]] || [[ "$path" == *.STEP ]]; then
+                stl_temp="/tmp/${name}.stl"
+                echo "Converting STEP to STL with FreeCAD..."
+                if freecad -c freecad_convert.py "$temp_file" "$stl_temp"; then
+                  echo "Converting STL to GLB with Blender..."
+                  if blender --background --python blender_convert.py -- "$stl_temp" "$output_file"; then
+                    echo "✅ Success: $name"
+                    ((success++))
+                    rm -f "$stl_temp"
+                  else
+                    echo "❌ Blender failed: $name"
+                    ((failure++))
+                  fi
+                else
+                  echo "❌ FreeCAD failed: $name"
+                  ((failure++))
+                fi
+              elif [[ "$path" == *.stl ]] || [[ "$path" == *.obj ]]; then
+                echo "Converting STL/OBJ to GLB with Blender..."
+                if blender --background --python blender_convert.py -- "$temp_file" "$output_file"; then
+                  echo "✅ Success: $name"
+                  ((success++))
+                else
+                  echo "❌ Failed: $name"
+                  ((failure++))
+                fi
               fi
+              
+              rm -f "$temp_file"
+            else
+              echo "❌ Download failed: $url"
+              ((failure++))
+            fi
+          done
+          
+          echo "ANYON_E results: $success success, $failure failed"
+
+      - name: Create fallback models if needed
+        run: |
+          total=$(find public/models -name "*.glb" | wc -l)
+          if [[ $total -eq 0 ]]; then
+            echo "No models converted, creating demos..."
+            
+            cat > demo_virgo.py << 'EOF'
+          import bpy
+          bpy.ops.object.select_all(action='SELECT')
+          bpy.ops.object.delete()
+          bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+          laptop = bpy.context.active_object
+          laptop.name = "Demo_Virgo"
+          laptop.scale = (3, 2, 0.1)
+          bpy.ops.export_scene.gltf(filepath='public/models/virgo/demo_laptop.glb', export_format='GLB')
+          EOF
+            
+            cat > demo_anyon.py << 'EOF'
+          import bpy
+          bpy.ops.object.select_all(action='SELECT')
+          bpy.ops.object.delete()
+          bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+          board = bpy.context.active_object
+          board.name = "Demo_Motherboard"
+          board.scale = (4, 3, 0.05)
+          bpy.ops.export_scene.gltf(filepath='public/models/anyon_e/demo_motherboard.glb', export_format='GLB')
+          EOF
+            
+            blender --background --python demo_virgo.py
+            blender --background --python demo_anyon.py
+            echo "Created demo models"
           fi
 
-      - name: Copy converted models to public directory
+      - name: Generate manifest
         run: |
-          # Models are already in public/models/ from the conversion step
-          echo "Models location:"
-          find public/models -name "*.glb" -exec ls -la {} \; || echo "No GLB files found"
-
-      - name: Update manifest.json
-        run: |
-          cat > public/models/manifest.json << 'MANIFEST_EOF'
+          cat > public/models/manifest.json << 'EOF'
           {
-            "lastUpdated": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "generated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "repositories": {
               "virgo": {
                 "name": "System76 Virgo",
-                "description": "Open source laptop keyboard and motherboard designs",
+                "description": "Open source laptop design by System76",
                 "repository": "https://github.com/system76/virgo",
-                "models": [
-                  {
-                    "id": "keyboard_switch",
-                    "name": "Keyboard Switch",
-                    "description": "Low-profile mechanical keyboard switch",
-                    "file": "keyboard_switch.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "keycap",
-                    "name": "Keycap",
-                    "description": "Low-profile keycap for mechanical switches",
-                    "file": "keycap.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "led",
-                    "name": "LED Component",
-                    "description": "1515 LED component for backlighting",
-                    "file": "led.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "trackpoint_nub",
-                    "name": "TrackPoint Nub",
-                    "description": "Pointing stick control nub",
-                    "file": "trackpoint_nub.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "connector",
-                    "name": "Board Connector",
-                    "description": "PCB interconnect connector",
-                    "file": "connector.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "mb_connector",
-                    "name": "Motherboard Connector",
-                    "description": "Main board connector component",
-                    "file": "mb_connector.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "ptn5110",
-                    "name": "PTN5110 USB-C Controller",
-                    "description": "USB-C controller IC package",
-                    "file": "ptn5110.glb",
-                    "category": "component"
-                  }
-                ]
+                "models": []
               },
               "anyon_e": {
-                "name": "ANYON_E ARM Laptop",
-                "description": "Open source ARM-based laptop design by Byrantech",
-                "repository": "https://github.com/byrantech/laptop",
-                "models": [
-                  {
-                    "id": "cm3588_module_stl",
-                    "name": "CM3588 Module (STL)",
-                    "description": "Complete CM3588 compute module - STL version",
-                    "file": "cm3588_module_stl.glb",
-                    "category": "module"
-                  },
-                  {
-                    "id": "cm3588_module_obj",
-                    "name": "CM3588 Module (OBJ)",
-                    "description": "Complete CM3588 compute module - OBJ version",
-                    "file": "cm3588_module_obj.glb",
-                    "category": "module"
-                  },
-                  {
-                    "id": "cm3588_module_step",
-                    "name": "CM3588 Module (STEP)",
-                    "description": "Complete CM3588 compute module - STEP version",
-                    "file": "cm3588_module_step.glb",
-                    "category": "module"
-                  },
-                  {
-                    "id": "wifi_card",
-                    "name": "WiFi Card (RT8852BE)",
-                    "description": "2230 form factor WiFi/Bluetooth card",
-                    "file": "wifi_card.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "ssd_2242",
-                    "name": "2242 SSD",
-                    "description": "M.2 2242 solid state drive",
-                    "file": "ssd_2242.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "ssd_2280",
-                    "name": "2280 SSD",
-                    "description": "M.2 2280 solid state drive",
-                    "file": "ssd_2280.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "board_connector",
-                    "name": "Board Connector",
-                    "description": "High-density board-to-board connector",
-                    "file": "board_connector.glb",
-                    "category": "component"
-                  },
-                  {
-                    "id": "ethernet_jack",
-                    "name": "Ethernet Jack",
-                    "description": "RJ45 ethernet connector",
-                    "file": "ethernet_jack.glb",
-                    "category": "component"
-                  }
-                ]
+                "name": "ANYON_E Laptop",
+                "description": "Open source laptop design by byrantech",
+                "repository": "https://github.com/byrantech/laptop", 
+                "models": []
               }
             }
           }
-          MANIFEST_EOF
+          EOF
           
-          echo "Generated manifest.json:"
-          cat public/models/manifest.json
+          # Update with actual files found
+          virgo_count=$(find public/models/virgo -name "*.glb" | wc -l)
+          anyon_count=$(find public/models/anyon_e -name "*.glb" | wc -l)
+          
+          echo "Found $virgo_count Virgo models and $anyon_count ANYON_E models"
 
       - name: Commit and push changes
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
           
           git add public/models/
           
-          if git diff --staged --quiet; then
+          if ! git diff --staged --quiet; then
+            git commit -m "Update 3D models from repositories"
+            git push
+          else
             echo "No changes to commit"
-            exit 0
           fi
-          
-          git commit -m "Update 3D models from repositories
-          
-          - Processed models from system76/virgo and byrantech/laptop
-          - Generated GLB files for web viewing
-          - Updated manifest.json with model metadata"
-          
-          git push
 
-      - name: Display conversion results
+      - name: Display results
         run: |
-          echo "=== FINAL MODEL INVENTORY ==="
+          echo "=== FINAL RESULTS ==="
           echo "Virgo models:"
-          find public/models/virgo -name "*.glb" -exec basename {} \; | sort || echo "None found"
+          find public/models/virgo -name "*.glb" -exec basename {} \; | sort || echo "None"
           echo ""
           echo "ANYON_E models:"
-          find public/models/anyon_e -name "*.glb" -exec basename {} \; | sort || echo "None found"
+          find public/models/anyon_e -name "*.glb" -exec basename {} \; | sort || echo "None"
           echo ""
           echo "Total GLB files: $(find public/models -name "*.glb" | wc -l)"
-          
-          echo ""
-          echo "=== FILE SIZES ==="
-          find public/models -name "*.glb" -exec ls -lh {} \; || echo "No files to show"
