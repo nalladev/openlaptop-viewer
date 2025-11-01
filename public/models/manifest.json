@@ -1,0 +1,15 @@
+{
+  "lastUpdated": "2024-01-01T00:00:00Z",
+  "models": [
+    {
+      "id": "virgo-sample",
+      "project": "virgo",
+      "filename": "virgo-keyboard.glb",
+      "url": "/models/sample-virgo.glb",
+      "sourceRepo": "system76/virgo",
+      "commitSha": "0000000000000000000000000000000000000000",
+      "publishedAt": "2024-01-01T00:00:00Z",
+      "status": "success"
+    }
+  ]
+}
