@@ -1,0 +1,32 @@
+{
+  "buildCommand": "pnpm build",
+  "outputDirectory": "out",
+  "installCommand": "pnpm install",
+  "framework": "nextjs",
+  "public": true,
+  "rewrites": [
+    {
+      "source": "/models/(.*)",
+      "destination": "/models/$1"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/models/(.*)",
+      "headers": [
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        },
+        {
+          "key": "Access-Control-Allow-Methods",
+          "value": "GET, OPTIONS"
+        },
+        {
+          "key": "Access-Control-Allow-Headers",
+          "value": "Content-Type"
+        }
+      ]
+    }
+  ]
+}

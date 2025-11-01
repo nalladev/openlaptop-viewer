@@ -24,10 +24,10 @@ jobs:
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
+    - name: Create output directories
+      run: |
+        mkdir -p public/models
+        mkdir -p state
 
     - name: Install Blender
       run: |
@@ -451,16 +451,14 @@ jobs:
           git push || echo "Push failed, continuing..."
         fi
 
-    - name: Setup Pages
-      if: github.ref == 'refs/heads/main'
-      uses: actions/configure-pages@v4
-
-    - name: Upload Pages artifact
-      if: github.ref == 'refs/heads/main'
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: public/models
-
-    - name: Deploy to Pages
-      if: github.ref == 'refs/heads/main'
-      uses: actions/deploy-pages@v4
+    - name: Display conversion results
+      run: |
+        echo "=== CONVERSION SUMMARY ==="
+        if [[ -d public/models ]]; then
+          find public/models -name "*.glb" -exec echo "✓ Created: {}" \;
+          echo ""
+          echo "Manifest contents:"
+          cat public/models/manifest.json || echo "No manifest found"
+        else
+          echo "No models directory found"
+        fi
