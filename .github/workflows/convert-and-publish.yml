@@ -3,7 +3,7 @@ name: Convert and Publish CAD Files
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 0 * * 0'  # Run weekly
 
 env:
   TARGET_REPOS: |
@@ -19,446 +19,498 @@ jobs:
       id-token: write
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Create output directories
-      run: |
-        mkdir -p public/models
-        mkdir -p state
+      - name: Create output directories
+        run: |
+          mkdir -p public/models/{virgo,anyon_e}
+          mkdir -p temp_downloads
 
-    - name: Install Blender
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y blender
+      - name: Install Blender
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y blender
 
-    - name: Install FreeCAD (fallback)
-      run: |
-        # Add universe repository and install FreeCAD
-        sudo add-apt-repository universe -y
-        sudo apt-get update
-        sudo apt-get install -y freecad || {
-          echo "FreeCAD installation failed, trying snap..."
-          sudo snap install freecad
-        }
+      - name: Install FreeCAD (fallback)
+        run: |
+          sudo apt-get install -y freecad-python3
+          # Create symlink for easier access
+          sudo ln -sf /usr/bin/freecad /usr/local/bin/freecad || true
+          # Alternative: Install via snap if apt fails
+          sudo snap install freecad || true
 
-    - name: Install gltf-transform CLI
-      run: |
-        npm install -g @gltf-transform/cli
+      - name: Install gltf-transform CLI
+        run: |
+          npm install -g @gltf-transform/cli
 
-    - name: Create directories
-      run: |
-        mkdir -p converted
-        mkdir -p public/models
-        mkdir -p state
+      - name: Create directories
+        run: |
+          mkdir -p public/models
+          mkdir -p temp_conversions
 
-    - name: Convert CAD files to GLB
-      shell: bash
-      run: |
-        set -euo pipefail
-        
-        # Create Blender conversion script
-        cat > convert_to_glb.py << 'EOF'
-        import bpy
-        import sys
-        import os
-        
-        # Clear default scene
-        bpy.ops.object.select_all(action='SELECT')
-        bpy.ops.object.delete(use_global=False)
-        
-        if "--" not in sys.argv:
-            print("Error: Missing arguments")
-            sys.exit(1)
-            
-        arg_index = sys.argv.index("--")
-        if len(sys.argv) <= arg_index + 2:
-            print("Error: Missing input or output file arguments")
-            sys.exit(1)
-            
-        input_file = sys.argv[arg_index + 1]
-        output_file = sys.argv[arg_index + 2]
-        
-        print(f"Converting {input_file} to {output_file}")
-        
-        try:
-            # Import based on file extension
-            ext = os.path.splitext(input_file)[1].lower()
-            
-            if ext in ['.step', '.stp']:
-                # Note: Blender doesn't natively support STEP, this will likely fail
-                # We'll handle this in the bash script
-                print("STEP files need FreeCAD conversion first")
-                sys.exit(1)
-            elif ext == '.stl':
-                bpy.ops.import_mesh.stl(filepath=input_file)
-            elif ext == '.obj':
-                bpy.ops.import_scene.obj(filepath=input_file)
-            elif ext in ['.iges', '.igs']:
-                print("IGES files need FreeCAD conversion first")
-                sys.exit(1)
-            else:
-                print(f"Unsupported file format: {ext}")
-                sys.exit(1)
-            
-            # Select all imported objects
-            bpy.ops.object.select_all(action='SELECT')
-            
-            if not bpy.context.selected_objects:
-                print("No objects were imported")
-                sys.exit(1)
-            
-            # Export to GLB
-            bpy.ops.export_scene.gltf(
-                filepath=output_file,
-                export_format='GLB',
-                use_selection=True,
-                export_apply=True
-            )
-            
-            print(f"Successfully converted to {output_file}")
-            
-        except Exception as e:
-            print(f"Error during conversion: {e}")
-            sys.exit(1)
-        EOF
-        
-        # Function to convert a single file
-        convert_file() {
-            local input_file="$1"
-            local output_file="$2"
-            local temp_dir="$3"
-            
-            echo "Attempting to convert: $input_file -> $output_file"
-            
-            # Get file extension
-            local ext=$(echo "${input_file##*.}" | tr '[:upper:]' '[:lower:]')
-            
-            # Try FreeCAD first for STEP/IGES files
-            if [[ "$ext" == "step" || "$ext" == "stp" || "$ext" == "iges" || "$ext" == "igs" ]]; then
-                echo "Using FreeCAD for $ext file..."
-                
-                # Create FreeCAD conversion script
-                cat > "${temp_dir}/freecad_convert.py" << 'FCEOF'
-        import FreeCAD
-        import Import
-        import Mesh
-        import sys
-        import os
-        
-        if len(sys.argv) < 3:
-            print("Usage: freecad_convert.py input_file output_file")
-            sys.exit(1)
-            
-        input_file = sys.argv[1]
-        output_file = sys.argv[2]
-        
-        try:
-            print(f"FreeCAD importing: {input_file}")
-            # Import the CAD file
-            doc = FreeCAD.newDocument()
-            Import.insert(input_file, doc.Name)
-            
-            # Get all objects and create mesh
-            objects = [obj for obj in doc.Objects if hasattr(obj, 'Shape') and obj.Shape.isValid()]
-            if not objects:
-                print("No valid objects found in file")
-                sys.exit(1)
-            
-            # Export as STL first (FreeCAD -> STL -> Blender -> GLB)
-            stl_temp = output_file.replace('.glb', '.stl')
-            
-            # Mesh the first valid object
-            obj = objects[0]
-            mesh = doc.addObject("Mesh::Feature", "Mesh")
-            mesh.Mesh = Mesh.Mesh(obj.Shape.tessellate(0.1))
-            
-            # Export the mesh as STL
-            mesh.Mesh.write(stl_temp)
-            print(f"Created intermediate STL: {stl_temp}")
-                
-            doc.close()
-        except Exception as e:
-            print(f"FreeCAD conversion error: {e}")
-            sys.exit(1)
-        FCEOF
-                
-                # Run FreeCAD conversion to STL, then Blender STL to GLB
-                local stl_temp="${output_file%.glb}.stl"
-                if freecad "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>/dev/null; then
-                    if [[ -f "$stl_temp" ]]; then
-                        if blender --background --python convert_to_glb.py -- "$stl_temp" "$output_file" 2>/dev/null; then
-                            rm -f "$stl_temp"
-                            echo "✓ FreeCAD+Blender conversion successful: $output_file"
-                            return 0
-                        fi
-                    fi
-                fi
-            else
-                # Try Blender conversion for STL/OBJ files
-                if blender --background --python convert_to_glb.py -- "$input_file" "$output_file" 2>/dev/null; then
-                    echo "✓ Blender conversion successful: $output_file"
-                    return 0
-                fi
-            fi
-            
-            echo "✗ Conversion failed for: $input_file"
-            return 1
-        }
-        
-        # Process each repository
-        while IFS= read -r repo; do
-            [[ -z "$repo" || "$repo" =~ ^[[:space:]]*$ ]] && continue
-            
-            owner=$(echo "$repo" | cut -d'/' -f1)
-            repo_name=$(echo "$repo" | cut -d'/' -f2)
-            
-            echo "Processing repository: $repo"
-            
-            # Check if repo has changed (skip check on manual dispatch)
-            if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
-                last_sha=$(curl -s "https://api.github.com/repos/$repo/commits/main" | jq -r '.sha // empty' 2>/dev/null || echo "")
-                stored_sha=$(cat "state/${owner}-${repo_name}-lastsha" 2>/dev/null || echo "")
-                
-                if [[ -n "$last_sha" && "$last_sha" == "$stored_sha" && "$last_sha" != "empty" ]]; then
-                    echo "No changes detected for $repo, skipping..."
-                    continue
-                fi
-                if [[ -n "$last_sha" && "$last_sha" != "empty" ]]; then
-                    echo "$last_sha" > "state/${owner}-${repo_name}-lastsha"
-                fi
-            else
-                # Get current SHA for manual runs
-                last_sha=$(curl -s "https://api.github.com/repos/$repo/commits/main" | jq -r '.sha // "manual"' 2>/dev/null || echo "manual")
-                if [[ "$last_sha" != "manual" ]]; then
-                    echo "$last_sha" > "state/${owner}-${repo_name}-lastsha"
-                fi
-            fi
-            
-            # Create output directory
-            output_dir="converted/${owner}-${repo_name}"
-            mkdir -p "$output_dir"
-            temp_dir=$(mktemp -d)
-            
-            # Find CAD files in the repository
-            echo "Searching for CAD files in $repo..."
-            
-            # Common paths to check for CAD files
-            paths_to_check=("" "chassis" "third-party" "mechanical" "3d" "models" "cad" "hardware" "pcb")
-            
-            found_files=false
-            
-            for path in "${paths_to_check[@]}"; do
-                # Get directory contents
-                api_url="https://api.github.com/repos/$repo/contents/$path"
-                files=$(curl -s "$api_url" 2>/dev/null | jq -r '.[] | select(.type == "file") | select(.name | test("\\.(step|stp|stl|obj|iges|igs|wrl|f3d|dwg)$"; "i")) | .download_url' 2>/dev/null || echo "")
-                
-                if [[ -n "$files" ]]; then
-                    echo "Found CAD files in $path/"
-                    while IFS= read -r download_url; do
-                        [[ -z "$download_url" ]] && continue
-                        
-                        filename=$(basename "$download_url" | sed 's/?.*$//')
-                        local_file="$temp_dir/$filename"
-                        output_file="$output_dir/${filename%.*}.glb"
-                        
-                        echo "Downloading: $download_url"
-                        if curl -L -s -o "$local_file" "$download_url"; then
-                            if convert_file "$local_file" "$output_file" "$temp_dir"; then
-                                found_files=true
-                            fi
-                        else
-                            echo "Failed to download: $download_url"
-                        fi
-                    done <<< "$files"
-                fi
-            done
-            
-            # If no files found, create a placeholder
-            if [[ "$found_files" != "true" ]]; then
-                echo "No CAD files found in $repo, creating placeholder..."
-                
-                # Create a simple placeholder GLB using Blender
-                cat > "${temp_dir}/create_placeholder.py" << 'EOF'
-        import bpy
-        import sys
-        
-        if "--" not in sys.argv or len(sys.argv) <= sys.argv.index("--") + 2:
-            print("Error: Missing arguments")
-            sys.exit(1)
-            
-        arg_index = sys.argv.index("--")
-        output_file = sys.argv[arg_index + 1]
-        repo_name = sys.argv[arg_index + 2]
-        
-        # Clear scene
-        bpy.ops.object.select_all(action='SELECT')
-        bpy.ops.object.delete(use_global=False)
-        
-        # Create a simple laptop-like shape
-        bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
-        laptop_base = bpy.context.active_object
-        laptop_base.name = "LaptopBase"
-        laptop_base.scale = (2, 1.5, 0.1)
-        
-        # Create screen
-        bpy.ops.mesh.primitive_cube_add(size=2, location=(0, -1.4, 0.8))
-        screen = bpy.context.active_object
-        screen.name = "Screen"
-        screen.scale = (1.8, 0.1, 1.2)
-        screen.rotation_euler = (0.3, 0, 0)  # Slightly angled
-        
-        # Add a simple material
-        mat = bpy.data.materials.new(name="Laptop")
-        mat.use_nodes = True
-        mat.node_tree.nodes.clear()
-        
-        # Create material nodes
-        output_node = mat.node_tree.nodes.new(type='ShaderNodeOutputMaterial')
-        principled_node = mat.node_tree.nodes.new(type='ShaderNodeBsdfPrincipled')
-        principled_node.inputs['Base Color'].default_value = (0.2, 0.2, 0.2, 1.0)
-        principled_node.inputs['Metallic'].default_value = 0.8
-        principled_node.inputs['Roughness'].default_value = 0.2
-        
-        mat.node_tree.links.new(principled_node.outputs['BSDF'], output_node.inputs['Surface'])
-        
-        # Assign material to objects
-        for obj in [laptop_base, screen]:
-            if obj.data.materials:
-                obj.data.materials[0] = mat
-            else:
-                obj.data.materials.append(mat)
-        
-        # Select all and export
-        bpy.ops.object.select_all(action='SELECT')
-        
-        bpy.ops.export_scene.gltf(
-            filepath=output_file,
-            export_format='GLB',
-            use_selection=True,
-            export_apply=True
-        )
-        
-        print(f"Created placeholder GLB: {output_file}")
-        EOF
-                
-                placeholder_file="$output_dir/placeholder.glb"
-                blender --background --python "${temp_dir}/create_placeholder.py" -- "$placeholder_file" "$repo_name" || echo "Failed to create placeholder for $repo"
-            fi
-            
-            # Clean up temp directory
-            rm -rf "$temp_dir"
-            
-            echo "Completed processing $repo"
-        done <<< "$TARGET_REPOS"
-
-    - name: Copy converted models to public directory
-      run: |
-        if [[ -d converted ]]; then
-          cp -r converted/* public/models/ 2>/dev/null || true
-        fi
-        ls -la public/models/
-
-    - name: Update manifest.json
-      run: |
-        cat > update_manifest.py << 'EOF'
-        import json
-        import os
-        from datetime import datetime
-        import glob
-        
-        # Initialize manifest structure
-        manifest = {
-            "lastUpdated": datetime.utcnow().isoformat() + "Z",
-            "models": {
-                "virgo": [],
-                "anyon_e": []
-            }
-        }
-        
-        # Map directory names to project keys
-        project_mapping = {
-            "system76-virgo": "virgo",
-            "byrantech-laptop": "anyon_e"
-        }
-        
-        models_dir = "public/models"
-        
-        if os.path.exists(models_dir):
-            for item in os.listdir(models_dir):
-                if item == "manifest.json":
-                    continue
-                    
-                dir_path = os.path.join(models_dir, item)
-                if not os.path.isdir(dir_path) or item not in project_mapping:
-                    continue
-                    
-                project_key = project_mapping[item]
-                repo_name = item.replace("-", "/")
-                
-                # Find GLB files in this directory
-                glb_files = glob.glob(os.path.join(dir_path, "*.glb"))
-                
-                for glb_file in glb_files:
-                    filename = os.path.basename(glb_file)
-                    
-                    # Read commit SHA if available
-                    sha_file = f"state/{item}-lastsha"
-                    commit_sha = "unknown"
-                    if os.path.exists(sha_file):
-                        try:
-                            with open(sha_file, 'r') as f:
-                                commit_sha = f.read().strip()
-                        except:
-                            pass
-                    
-                    model_info = {
-                        "name": filename,
-                        "url": f"/models/{item}/{filename}",
-                        "sourceRepo": repo_name,
-                        "commitSha": commit_sha,
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
-                        "status": "success"
-                    }
-                    
-                    manifest["models"][project_key].append(model_info)
-        
-        # Write manifest
-        manifest_path = "public/models/manifest.json"
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
-        
-        print("Updated manifest.json")
-        print(json.dumps(manifest, indent=2))
-        EOF
-        
-        python update_manifest.py
-
-    - name: Commit and push changes
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        
-        git add public/models/ || true
-        git add state/ || true
-        
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-        else
-          git commit -m "Update 3D models and manifest [skip ci]" || echo "Commit failed, continuing..."
-          git push || echo "Push failed, continuing..."
-        fi
-
-    - name: Display conversion results
-      run: |
-        echo "=== CONVERSION SUMMARY ==="
-        if [[ -d public/models ]]; then
-          find public/models -name "*.glb" -exec echo "✓ Created: {}" \;
+      - name: Convert CAD files to GLB
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # Create Blender conversion script
+          cat > convert_to_glb.py << 'EOF'
+          import bpy
+          import sys
+          import os
+          
+          # Clear default scene
+          bpy.ops.object.select_all(action='SELECT')
+          bpy.ops.object.delete(use_global=False)
+          
+          if "--" not in sys.argv:
+              print("Error: Missing arguments")
+              sys.exit(1)
+              
+          arg_index = sys.argv.index("--")
+          if len(sys.argv) <= arg_index + 2:
+              print("Error: Missing input or output file arguments")
+              sys.exit(1)
+              
+          input_file = sys.argv[arg_index + 1]
+          output_file = sys.argv[arg_index + 2]
+          
+          print(f"Converting {input_file} to {output_file}")
+          
+          try:
+              # Import based on file extension
+              ext = os.path.splitext(input_file)[1].lower()
+              
+              if ext in ['.step', '.stp']:
+                  # Note: Blender doesn't natively support STEP, this will likely fail
+                  # We'll handle this in the bash script
+                  print("STEP files need FreeCAD conversion first")
+                  sys.exit(1)
+              elif ext == '.stl':
+                  bpy.ops.import_mesh.stl(filepath=input_file)
+              elif ext == '.obj':
+                  bpy.ops.import_scene.obj(filepath=input_file)
+              elif ext in ['.iges', '.igs']:
+                  print("IGES files need FreeCAD conversion first")
+                  sys.exit(1)
+              else:
+                  print(f"Unsupported file format: {ext}")
+                  sys.exit(1)
+              
+              # Select all imported objects
+              bpy.ops.object.select_all(action='SELECT')
+              
+              if not bpy.context.selected_objects:
+                  print("No objects were imported")
+                  sys.exit(1)
+              
+              # Export to GLB
+              bpy.ops.export_scene.gltf(
+                  filepath=output_file,
+                  export_format='GLB',
+                  use_selection=True,
+                  export_apply=True
+              )
+              
+              print(f"Successfully converted to {output_file}")
+              
+          except Exception as e:
+              print(f"Error during conversion: {e}")
+              sys.exit(1)
+          EOF
+          
+          # Function to convert a single file
+          convert_file() {
+              local input_file="$1"
+              local output_file="$2"
+              local temp_dir="$3"
+              
+              echo "Attempting to convert: $input_file -> $output_file"
+              
+              # Get file extension
+              local ext=$(echo "${input_file##*.}" | tr '[:upper:]' '[:lower:]')
+              
+              # Try FreeCAD first for STEP/IGES files
+              if [[ "$ext" == "step" || "$ext" == "stp" || "$ext" == "iges" || "$ext" == "igs" ]]; then
+                  echo "Using FreeCAD for $ext file..."
+                  
+                  # Create FreeCAD conversion script
+                  cat > "${temp_dir}/freecad_convert.py" << 'FCEOF'
+          import FreeCAD
+          import Import
+          import Mesh
+          import sys
+          import os
+          
+          if len(sys.argv) < 3:
+              print("Usage: freecad_convert.py input_file output_file")
+              sys.exit(1)
+              
+          input_file = sys.argv[1]
+          output_file = sys.argv[2]
+          
+          try:
+              print(f"FreeCAD importing: {input_file}")
+              # Import the CAD file
+              doc = FreeCAD.newDocument()
+              Import.insert(input_file, doc.Name)
+              
+              # Get all objects and create mesh
+              objects = [obj for obj in doc.Objects if hasattr(obj, 'Shape') and obj.Shape.isValid()]
+              if not objects:
+                  print("No valid objects found in file")
+                  sys.exit(1)
+              
+              # Export as STL first (FreeCAD -> STL -> Blender -> GLB)
+              stl_temp = output_file.replace('.glb', '.stl')
+              
+              # Mesh the first valid object
+              obj = objects[0]
+              mesh = doc.addObject("Mesh::Feature", "Mesh")
+              mesh.Mesh = Mesh.Mesh(obj.Shape.tessellate(0.1))
+              
+              # Export the mesh as STL
+              mesh.Mesh.write(stl_temp)
+              print(f"Created intermediate STL: {stl_temp}")
+                  
+              doc.close()
+          except Exception as e:
+              print(f"FreeCAD conversion error: {e}")
+              sys.exit(1)
+          FCEOF
+                  
+                  # Run FreeCAD conversion to STL, then Blender STL to GLB
+                  local stl_temp="${output_file%.glb}.stl"
+                  if freecad "${temp_dir}/freecad_convert.py" "$input_file" "$stl_temp" 2>/dev/null; then
+                      if [[ -f "$stl_temp" ]]; then
+                          if blender --background --python convert_to_glb.py -- "$stl_temp" "$output_file" 2>/dev/null; then
+                              rm -f "$stl_temp"
+                              echo "✓ FreeCAD+Blender conversion successful: $output_file"
+                              return 0
+                          fi
+                      fi
+                  fi
+              else
+                  # Try Blender conversion for STL/OBJ files
+                  if blender --background --python convert_to_glb.py -- "$input_file" "$output_file" 2>/dev/null; then
+                      echo "✓ Blender conversion successful: $output_file"
+                      return 0
+                  fi
+              fi
+              
+              echo "✗ Conversion failed: $input_file"
+              return 1
+          }
+          
+          # Initialize conversion summary
+          total_files=0
+          successful_conversions=0
+          failed_conversions=0
+          conversion_log=""
+          
+          echo "=== STARTING 3D MODEL CONVERSIONS ==="
+          
+          # Define all files to process with their metadata
+          declare -A files_to_process=(
+              # System76 Virgo - Keyboard Components
+              ["virgo_keyboard_switch"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/CPG142501DXX%20v3.step"
+              ["virgo_keycap"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/CPG142501DXX_keycap.step"
+              ["virgo_led"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/LED_1515.step"
+              ["virgo_trackpoint_nub"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/Sprintek%20Nub%20v9.step"
+              ["virgo_connector"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-keyboard/models/c-2-1734839-4-c-3d.stp"
+              
+              # System76 Virgo - Motherboard Components
+              ["virgo_mb_connector"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-rpl-uph/models/1003-002-01100.stp"
+              ["virgo_ptn5110"]="https://raw.githubusercontent.com/system76/virgo/main/pcb-rpl-uph/models/PTN5110.step"
+              
+              # Byrantech Laptop - Complete Module
+              ["anyon_e_cm3588_module_stl"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/CM3588%203D/CM3588.stl"
+              ["anyon_e_cm3588_module_obj"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/CM3588%203D/CM3588.obj"
+              ["anyon_e_cm3588_module_step"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/CM3588%203D/CM3588_3D.step"
+              
+              # Byrantech Laptop - Component Models
+              ["anyon_e_wifi_card"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/2230_RT8852BE.step"
+              ["anyon_e_ssd_2242"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/2242_SSD.step"
+              ["anyon_e_ssd_2280"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/2280_SSD.step"
+              ["anyon_e_board_connector"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/DF40C-100DS.stp"
+              ["anyon_e_ethernet_jack"]="https://raw.githubusercontent.com/byrantech/laptop/main/motherboard/library/LPJM4938GENL.STEP"
+          )
+          
+          # Process each file
+          for key in "${!files_to_process[@]}"; do
+              url="${files_to_process[$key]}"
+              
+              # Determine target directory and filename
+              if [[ "$key" == virgo_* ]]; then
+                  target_dir="public/models/virgo"
+                  display_name="${key#virgo_}"
+              else
+                  target_dir="public/models/anyon_e"
+                  display_name="${key#anyon_e_}"
+              fi
+              
+              # Get file extension from URL
+              filename=$(basename "$url")
+              ext="${filename##*.}"
+              
+              # Download the file
+              temp_file="temp_downloads/${key}.${ext}"
+              output_file="${target_dir}/${display_name}.glb"
+              
+              total_files=$((total_files + 1))
+              
+              echo ""
+              echo "=== Processing: $key ==="
+              echo "URL: $url"
+              echo "Output: $output_file"
+              
+              # Create target directory
+              mkdir -p "$target_dir"
+              
+              # Download file with error handling
+              if curl -L -f -o "$temp_file" "$url" 2>/dev/null; then
+                  echo "✓ Downloaded: $temp_file"
+                  
+                  # Attempt conversion
+                  if convert_file "$temp_file" "$output_file" "temp_conversions"; then
+                      successful_conversions=$((successful_conversions + 1))
+                      conversion_log="${conversion_log}✓ ${key}: SUCCESS\n"
+                      
+                      # Optimize GLB file if it exists
+                      if [[ -f "$output_file" ]]; then
+                          echo "Optimizing GLB file..."
+                          gltf-transform optimize "$output_file" "$output_file" 2>/dev/null || echo "Optimization failed, keeping original"
+                      fi
+                  else
+                      failed_conversions=$((failed_conversions + 1))
+                      conversion_log="${conversion_log}✗ ${key}: FAILED\n"
+                  fi
+                  
+                  # Clean up downloaded file
+                  rm -f "$temp_file"
+              else
+                  echo "✗ Download failed for: $url"
+                  failed_conversions=$((failed_conversions + 1))
+                  conversion_log="${conversion_log}✗ ${key}: DOWNLOAD FAILED\n"
+              fi
+          done
+          
           echo ""
-          echo "Manifest contents:"
-          cat public/models/manifest.json || echo "No manifest found"
-        else
-          echo "No models directory found"
-        fi
+          echo "=== CONVERSION SUMMARY ==="
+          echo "Total files processed: $total_files"
+          echo "Successful conversions: $successful_conversions"
+          echo "Failed conversions: $failed_conversions"
+          echo ""
+          echo "=== DETAILED RESULTS ==="
+          echo -e "$conversion_log"
+          
+          # Create a simple fallback if no conversions succeeded
+          if [[ $successful_conversions -eq 0 ]]; then
+              echo "WARNING: No models were successfully converted. Creating fallback content."
+              
+              # Create placeholder GLB files for UI testing
+              cat > temp_conversions/create_placeholder.py << 'PLACEHOLDER_EOF'
+          import bpy
+          import sys
+          
+          # Clear scene
+          bpy.ops.object.select_all(action='SELECT')
+          bpy.ops.object.delete(use_global=False)
+          
+          # Create a simple placeholder cube
+          bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+          cube = bpy.context.object
+          cube.name = "PlaceholderModel"
+          
+          # Export to GLB
+          output_file = sys.argv[-1]
+          bpy.ops.export_scene.gltf(
+              filepath=output_file,
+              export_format='GLB',
+              use_selection=False,
+              export_apply=True
+          )
+          print(f"Created placeholder: {output_file}")
+          PLACEHOLDER_EOF
+              
+              # Create placeholder models
+              mkdir -p public/models/{virgo,anyon_e}
+              blender --background --python temp_conversions/create_placeholder.py -- public/models/virgo/placeholder.glb 2>/dev/null || true
+              blender --background --python temp_conversions/create_placeholder.py -- public/models/anyon_e/placeholder.glb 2>/dev/null || true
+          fi
+
+      - name: Copy converted models to public directory
+        run: |
+          # Models are already in public/models/ from the conversion step
+          echo "Models location:"
+          find public/models -name "*.glb" -exec ls -la {} \; || echo "No GLB files found"
+
+      - name: Update manifest.json
+        run: |
+          cat > public/models/manifest.json << 'MANIFEST_EOF'
+          {
+            "lastUpdated": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "repositories": {
+              "virgo": {
+                "name": "System76 Virgo",
+                "description": "Open source laptop keyboard and motherboard designs",
+                "repository": "https://github.com/system76/virgo",
+                "models": [
+                  {
+                    "id": "keyboard_switch",
+                    "name": "Keyboard Switch",
+                    "description": "Low-profile mechanical keyboard switch",
+                    "file": "keyboard_switch.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "keycap",
+                    "name": "Keycap",
+                    "description": "Low-profile keycap for mechanical switches",
+                    "file": "keycap.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "led",
+                    "name": "LED Component",
+                    "description": "1515 LED component for backlighting",
+                    "file": "led.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "trackpoint_nub",
+                    "name": "TrackPoint Nub",
+                    "description": "Pointing stick control nub",
+                    "file": "trackpoint_nub.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "connector",
+                    "name": "Board Connector",
+                    "description": "PCB interconnect connector",
+                    "file": "connector.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "mb_connector",
+                    "name": "Motherboard Connector",
+                    "description": "Main board connector component",
+                    "file": "mb_connector.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "ptn5110",
+                    "name": "PTN5110 USB-C Controller",
+                    "description": "USB-C controller IC package",
+                    "file": "ptn5110.glb",
+                    "category": "component"
+                  }
+                ]
+              },
+              "anyon_e": {
+                "name": "ANYON_E ARM Laptop",
+                "description": "Open source ARM-based laptop design by Byrantech",
+                "repository": "https://github.com/byrantech/laptop",
+                "models": [
+                  {
+                    "id": "cm3588_module_stl",
+                    "name": "CM3588 Module (STL)",
+                    "description": "Complete CM3588 compute module - STL version",
+                    "file": "cm3588_module_stl.glb",
+                    "category": "module"
+                  },
+                  {
+                    "id": "cm3588_module_obj",
+                    "name": "CM3588 Module (OBJ)",
+                    "description": "Complete CM3588 compute module - OBJ version",
+                    "file": "cm3588_module_obj.glb",
+                    "category": "module"
+                  },
+                  {
+                    "id": "cm3588_module_step",
+                    "name": "CM3588 Module (STEP)",
+                    "description": "Complete CM3588 compute module - STEP version",
+                    "file": "cm3588_module_step.glb",
+                    "category": "module"
+                  },
+                  {
+                    "id": "wifi_card",
+                    "name": "WiFi Card (RT8852BE)",
+                    "description": "2230 form factor WiFi/Bluetooth card",
+                    "file": "wifi_card.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "ssd_2242",
+                    "name": "2242 SSD",
+                    "description": "M.2 2242 solid state drive",
+                    "file": "ssd_2242.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "ssd_2280",
+                    "name": "2280 SSD",
+                    "description": "M.2 2280 solid state drive",
+                    "file": "ssd_2280.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "board_connector",
+                    "name": "Board Connector",
+                    "description": "High-density board-to-board connector",
+                    "file": "board_connector.glb",
+                    "category": "component"
+                  },
+                  {
+                    "id": "ethernet_jack",
+                    "name": "Ethernet Jack",
+                    "description": "RJ45 ethernet connector",
+                    "file": "ethernet_jack.glb",
+                    "category": "component"
+                  }
+                ]
+              }
+            }
+          }
+          MANIFEST_EOF
+          
+          echo "Generated manifest.json:"
+          cat public/models/manifest.json
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          git add public/models/
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "Update 3D models from repositories
+          
+          - Processed models from system76/virgo and byrantech/laptop
+          - Generated GLB files for web viewing
+          - Updated manifest.json with model metadata"
+          
+          git push
+
+      - name: Display conversion results
+        run: |
+          echo "=== FINAL MODEL INVENTORY ==="
+          echo "Virgo models:"
+          find public/models/virgo -name "*.glb" -exec basename {} \; | sort || echo "None found"
+          echo ""
+          echo "ANYON_E models:"
+          find public/models/anyon_e -name "*.glb" -exec basename {} \; | sort || echo "None found"
+          echo ""
+          echo "Total GLB files: $(find public/models -name "*.glb" | wc -l)"
+          
+          echo ""
+          echo "=== FILE SIZES ==="
+          find public/models -name "*.glb" -exec ls -lh {} \; || echo "No files to show"
