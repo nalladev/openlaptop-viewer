@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import ModelViewer from "@/components/model-viewer"
+import ModelViewer from "./components/ModelViewer"
 
 interface ModelData {
   id: string
@@ -66,24 +66,17 @@ export default function Home() {
   const triggerWorkflow = async () => {
     try {
       setTriggering(true)
-      const response = await fetch("/api/trigger-workflow", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      })
-
-      const result = await response.json()
-
-      if (response.ok) {
-        alert("Workflow triggered successfully! Check the Actions tab in GitHub.")
-      } else {
-        console.error("Workflow trigger failed:", result)
-        alert(`Failed to trigger workflow: ${result.error || "Unknown error"}`)
-      }
+      // Since we're on a static site, direct users to GitHub Actions
+      const repoUrl = "https://github.com/yourusername/openlaptop-viewer"
+      const actionsUrl = `${repoUrl}/actions/workflows/convert-and-publish.yml`
+      
+      alert(`Please visit GitHub Actions to manually trigger the workflow:\n\n${actionsUrl}\n\nClick "Run workflow" to start the conversion process.`)
+      
+      // Open the GitHub Actions page
+      window.open(actionsUrl, '_blank')
     } catch (err) {
-      console.error("Error triggering workflow:", err)
-      alert("Error triggering workflow. Check console for details.")
+      console.error("Error opening workflow page:", err)
+      alert("Please visit your GitHub repository and go to Actions > Convert and Publish CAD Files > Run workflow")
     } finally {
       setTriggering(false)
     }
@@ -111,7 +104,7 @@ export default function Home() {
                 className="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm transition-colors disabled:opacity-50"
                 disabled={triggering}
               >
-                {triggering ? "Triggering..." : "Convert Models"}
+                {triggering ? "Opening GitHub..." : "Trigger Workflow"}
               </button>
             </div>
           </div>
@@ -159,8 +152,7 @@ export default function Home() {
           <div className="bg-yellow-900 border border-yellow-700 text-yellow-100 px-4 py-3 rounded mb-6">
             <p className="font-medium">No manifest found.</p>
             <p className="text-sm">
-              Click &quot;Convert Models&quot; to run the workflow and generate 3D
-              models.
+              Click &quot;Trigger Workflow&quot; to open GitHub Actions and run the conversion workflow.
             </p>
           </div>
         )}
@@ -242,7 +234,7 @@ export default function Home() {
                   <div>
                     <dt className="text-sm font-medium text-gray-400">Last Updated</dt>
                     <dd className="text-sm text-gray-300">
-                      {new Date(currentModel.timestamp).toLocaleString()}
+                      {new Date(currentModel.publishedAt).toLocaleString()}
                     </dd>
                   </div>
                 </div>
@@ -256,11 +248,12 @@ export default function Home() {
             <div className="bg-gray-800 rounded-lg p-6">
               <h3 className="text-lg font-semibold mb-4">Instructions</h3>
               <div className="text-sm text-gray-300 space-y-2">
-                <p>1. Click &quot;Convert Models&quot; to fetch and convert CAD files</p>
-                <p>2. Wait for the GitHub Action workflow to complete</p>
-                <p>3. Refresh the page to see converted 3D models</p>
-                <p>4. Use mouse to rotate, zoom, and pan the model</p>
-                <p>5. Toggle &quot;Exploded View&quot; to see component separation</p>
+                <p>1. Click &quot;Trigger Workflow&quot; to open GitHub Actions</p>
+                <p>2. Click &quot;Run workflow&quot; to start CAD file conversion</p>
+                <p>3. Wait for the workflow to complete and deploy</p>
+                <p>4. Refresh this page to see converted 3D models</p>
+                <p>5. Use mouse to rotate, zoom, and pan the model</p>
+                <p>6. Toggle &quot;Exploded View&quot; to see component separation</p>
               </div>
             </div>
 

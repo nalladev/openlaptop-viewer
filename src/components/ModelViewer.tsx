@@ -1,3 +1,5 @@
+import React from 'react';
+
 const models: Record<string, string> = {
   'system76-virgo': '/models/system76-virgo.glb',
   'framework-anyon-e': '/models/framework-anyon-e.glb'
