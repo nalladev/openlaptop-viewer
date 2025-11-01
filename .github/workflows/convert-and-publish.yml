@@ -1,4 +1,4 @@
-name: Convert and Publish CAD Models
+name: Convert and Publish CAD Files
 
 on:
   workflow_dispatch:

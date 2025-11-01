@@ -1,27 +1,16 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true,
-  swcMinify: true,
-  env: {
-    CUSTOM_KEY: process.env.CUSTOM_KEY,
+  output: 'export',
+  trailingSlash: true,
+  images: {
+    unoptimized: true
   },
-  async rewrites() {
-    return [
-      {
-        source: '/models/:path*',
-        destination: '/models/:path*',
-      },
-    ]
-  },
-  webpack: (config) => {
-    // Handle GLB files
-    config.module.rules.push({
-      test: /\.(glb|gltf)$/,
-      type: 'asset/resource',
-    })
-    
-    return config
-  },
+  assetPrefix: process.env.NODE_ENV === 'production' ? '/openlaptop-viewer' : '',
+  basePath: process.env.NODE_ENV === 'production' ? '/openlaptop-viewer' : '',
+  turbopack: {},
+  experimental: {
+    turbo: {}
+  }
 }
 
 module.exports = nextConfig
