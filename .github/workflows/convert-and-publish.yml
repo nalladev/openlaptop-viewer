@@ -36,7 +36,13 @@ jobs:
 
     - name: Install FreeCAD (fallback)
       run: |
-        sudo apt-get install -y freecad
+        # Add universe repository and install FreeCAD
+        sudo add-apt-repository universe -y
+        sudo apt-get update
+        sudo apt-get install -y freecad || {
+          echo "FreeCAD installation failed, trying snap..."
+          sudo snap install freecad
+        }
 
     - name: Install gltf-transform CLI
       run: |
