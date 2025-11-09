@@ -2,8 +2,6 @@ name: Convert and Publish CAD Files
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * 0'
 
 env:
   TARGET_REPOS: |
@@ -55,13 +53,13 @@ jobs:
           cat > blender_convert.py << 'EOF'
           import bpy
           import sys
-          
+
           bpy.ops.object.select_all(action='SELECT')
           bpy.ops.object.delete()
-          
+
           input_file = sys.argv[-2]
           output_file = sys.argv[-1]
-          
+
           try:
               if input_file.lower().endswith('.stl'):
                   bpy.ops.import_mesh.stl(filepath=input_file)
@@ -70,9 +68,9 @@ jobs:
               else:
                   print(f"Unsupported file type: {input_file}")
                   sys.exit(1)
-              
+
               bpy.ops.object.select_all(action='SELECT')
-              
+
               bpy.ops.export_scene.gltf(
                   filepath=output_file,
                   export_format='GLB',
@@ -82,14 +80,14 @@ jobs:
                   export_cameras=False,
                   export_lights=False
               )
-              
+
               print(f"Successfully converted {input_file} to {output_file}")
-              
+
           except Exception as e:
               print(f"Blender conversion failed: {e}")
               sys.exit(1)
           EOF
-          
+
           # Create FreeCAD conversion script
           cat > freecad_convert.py << 'EOF'
           import sys
@@ -101,27 +99,27 @@ jobs:
           except ImportError as e:
               print(f"FreeCAD modules not available: {e}")
               sys.exit(1)
-          
+
           if len(sys.argv) < 3:
               print("Usage: freecad_convert.py <input_step> <output_stl>")
               sys.exit(1)
-          
+
           input_path = sys.argv[1]
           output_path = sys.argv[2]
-          
+
           try:
               print(f"Loading: {input_path}")
-              
+
               doc = FreeCAD.newDocument("conversion")
               Import.insert(input_path, doc.Name)
-              
+
               objects = doc.Objects
               print(f"Found {len(objects)} objects")
-              
+
               if not objects:
                   print("No objects found in STEP file")
                   sys.exit(1)
-              
+
               mesh_objects = []
               for obj in objects:
                   if hasattr(obj, 'Shape') and obj.Shape:
@@ -133,16 +131,16 @@ jobs:
                       except Exception as e:
                           print(f"Failed to mesh object {obj.Label}: {e}")
                           continue
-              
+
               if not mesh_objects:
                   print("No meshable objects found")
                   sys.exit(1)
-              
+
               print(f"Exporting to: {output_path}")
               mesh_objects[0].Mesh.write(output_path)
-              
+
               print("Conversion successful")
-              
+
           except Exception as e:
               import traceback
               print(f"Error during conversion: {e}")
@@ -155,7 +153,7 @@ jobs:
           echo "=== Processing System76 Virgo ==="
           success=0
           failure=0
-          
+
           declare -A files=(
             ["pcb-keyboard/models/CPG142501DXX v3.step"]="CPG142501DXX_v3"
             ["pcb-keyboard/models/CPG142501DXX_keycap.step"]="CPG142501DXX_keycap"
@@ -165,13 +163,13 @@ jobs:
             ["pcb-rpl-uph/models/1003-002-01100.stp"]="mb_connector"
             ["pcb-rpl-uph/models/PTN5110.step"]="PTN5110"
           )
-          
+
           for path in "${!files[@]}"; do
             name="${files[$path]}"
             url="https://raw.githubusercontent.com/system76/virgo/main/${path}"
             temp_file="/tmp/${name}.tmp"
             output_file="public/models/virgo/${name}.glb"
-            
+
             echo "Downloading: $url"
             if curl -L -f -o "$temp_file" "$url"; then
               size=$(stat -c%s "$temp_file")
@@ -180,7 +178,7 @@ jobs:
                 rm -f "$temp_file"
                 continue
               fi
-              
+
               if [[ "$path" == *.step ]] || [[ "$path" == *.stp ]]; then
                 stl_temp="/tmp/${name}.stl"
                 echo "Converting STEP to STL with FreeCAD..."
@@ -208,14 +206,14 @@ jobs:
                   ((failure++))
                 fi
               fi
-              
+
               rm -f "$temp_file"
             else
               echo "❌ Download failed: $url"
               ((failure++))
             fi
           done
-          
+
           echo "Virgo results: $success success, $failure failed"
 
       - name: Download and convert ANYON_E files
@@ -223,7 +221,7 @@ jobs:
           echo "=== Processing ANYON_E ==="
           success=0
           failure=0
-          
+
           declare -A files=(
             ["motherboard/CM3588 3D/CM3588.stl"]="CM3588"
             ["motherboard/CM3588 3D/CM3588.obj"]="CM3588_obj"
@@ -234,13 +232,13 @@ jobs:
             ["library/DF40C-100DS.stp"]="board_connector"
             ["library/LPJM4938GENL.STEP"]="ethernet_jack"
           )
-          
+
           for path in "${!files[@]}"; do
             name="${files[$path]}"
             url="https://raw.githubusercontent.com/byrantech/laptop/main/${path}"
             temp_file="/tmp/${name}.tmp"
             output_file="public/models/anyon_e/${name}.glb"
-            
+
             echo "Downloading: $url"
             if curl -L -f -o "$temp_file" "$url"; then
               size=$(stat -c%s "$temp_file")
@@ -249,7 +247,7 @@ jobs:
                 rm -f "$temp_file"
                 continue
               fi
-              
+
               if [[ "$path" == *.step ]] || [[ "$path" == *.stp ]] || [[ "$path" == *.STEP ]]; then
                 stl_temp="/tmp/${name}.stl"
                 echo "Converting STEP to STL with FreeCAD..."
@@ -277,14 +275,14 @@ jobs:
                   ((failure++))
                 fi
               fi
-              
+
               rm -f "$temp_file"
             else
               echo "❌ Download failed: $url"
               ((failure++))
             fi
           done
-          
+
           echo "ANYON_E results: $success success, $failure failed"
 
       - name: Create fallback models if needed
@@ -292,7 +290,7 @@ jobs:
           total=$(find public/models -name "*.glb" | wc -l)
           if [[ $total -eq 0 ]]; then
             echo "No models converted, creating demos..."
-            
+
             cat > demo_virgo.py << 'EOF'
           import bpy
           bpy.ops.object.select_all(action='SELECT')
@@ -303,7 +301,7 @@ jobs:
           laptop.scale = (3, 2, 0.1)
           bpy.ops.export_scene.gltf(filepath='public/models/virgo/demo_laptop.glb', export_format='GLB')
           EOF
-            
+
             cat > demo_anyon.py << 'EOF'
           import bpy
           bpy.ops.object.select_all(action='SELECT')
@@ -314,7 +312,7 @@ jobs:
           board.scale = (4, 3, 0.05)
           bpy.ops.export_scene.gltf(filepath='public/models/anyon_e/demo_motherboard.glb', export_format='GLB')
           EOF
-            
+
             blender --background --python demo_virgo.py
             blender --background --python demo_anyon.py
             echo "Created demo models"
@@ -335,26 +333,26 @@ jobs:
               "anyon_e": {
                 "name": "ANYON_E Laptop",
                 "description": "Open source laptop design by byrantech",
-                "repository": "https://github.com/byrantech/laptop", 
+                "repository": "https://github.com/byrantech/laptop",
                 "models": []
               }
             }
           }
           EOF
-          
+
           # Update with actual files found
           virgo_count=$(find public/models/virgo -name "*.glb" | wc -l)
           anyon_count=$(find public/models/anyon_e -name "*.glb" | wc -l)
-          
+
           echo "Found $virgo_count Virgo models and $anyon_count ANYON_E models"
 
       - name: Commit and push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
+
           git add public/models/
-          
+
           if ! git diff --staged --quiet; then
             git commit -m "Update 3D models from repositories"
             git push

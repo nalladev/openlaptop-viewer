@@ -2,8 +2,6 @@ name: Convert and Publish CAD Files
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * 0'  # Run weekly
 
 env:
   TARGET_REPOS: |
@@ -37,7 +35,7 @@ jobs:
       - name: Install FreeCAD
         run: |
           echo "=== Installing FreeCAD ==="
-          
+
           # Try apt first
           if sudo apt install -y freecad; then
             echo "FreeCAD installed via apt"
@@ -50,7 +48,7 @@ jobs:
               exit 1
             fi
           fi
-          
+
           # Verify installation
           which freecad || echo "freecad command not found in PATH"
           freecad --version || echo "freecad --version failed"
@@ -64,13 +62,13 @@ jobs:
         run: |
           #!/bin/bash
           set -e
-          
+
           # Track conversion results
           success_count=0
           failure_count=0
-          
+
           echo "=== Starting CAD to GLB conversion ==="
-          
+
           # Function to check if file is Git LFS pointer
           is_lfs_pointer() {
             local file="$1"
@@ -80,19 +78,19 @@ jobs:
             fi
             return 1
           }
-          
+
           # Create Blender script for STL/OBJ conversion
           cat > /tmp/blender_convert.py << 'BLENDER_SCRIPT'
           import bpy
           import sys
-          
+
           # Clear default scene
           bpy.ops.object.select_all(action='SELECT')
           bpy.ops.object.delete()
-          
+
           input_file = sys.argv[-2]
           output_file = sys.argv[-1]
-          
+
           try:
               # Import based on file extension
               if input_file.lower().endswith('.stl'):
@@ -102,10 +100,10 @@ jobs:
               else:
                   print(f"Unsupported file type: {input_file}")
                   sys.exit(1)
-              
+
               # Select all imported objects
               bpy.ops.object.select_all(action='SELECT')
-              
+
               # Export as GLB
               bpy.ops.export_scene.gltf(
                   filepath=output_file,
@@ -116,14 +114,14 @@ jobs:
                   export_cameras=False,
                   export_lights=False
               )
-              
+
               print(f"Successfully converted {input_file} to {output_file}")
-              
+
           except Exception as e:
               print(f"Blender conversion failed: {e}")
               sys.exit(1)
           BLENDER_SCRIPT
-          
+
           # Create FreeCAD script for STEP conversion
           cat > /tmp/freecad_convert.py << 'FREECAD_SCRIPT'
           import sys
@@ -135,31 +133,31 @@ jobs:
           except ImportError as e:
               print(f"FreeCAD modules not available: {e}")
               sys.exit(1)
-          
+
           if len(sys.argv) < 3:
               print("Usage: freecad_convert.py <input_step> <output_stl>")
               sys.exit(1)
-          
+
           input_path = sys.argv[1]
           output_path = sys.argv[2]
-          
+
           try:
               print(f"Loading: {input_path}")
-              
+
               # Create new document
               doc = FreeCAD.newDocument("conversion")
-              
+
               # Import STEP file
               Import.insert(input_path, doc.Name)
-              
+
               # Get all objects
               objects = doc.Objects
               print(f"Found {len(objects)} objects")
-              
+
               if not objects:
                   print("No objects found in STEP file")
                   sys.exit(1)
-              
+
               # Create mesh from all objects
               mesh_objects = []
               for obj in objects:
@@ -173,48 +171,48 @@ jobs:
                       except Exception as e:
                           print(f"Failed to mesh object {obj.Label}: {e}")
                           continue
-              
+
               if not mesh_objects:
                   print("No meshable objects found")
                   sys.exit(1)
-              
+
               # Export first mesh (or could combine all)
               print(f"Exporting to: {output_path}")
               mesh_objects[0].Mesh.write(output_path)
-              
+
               print("Conversion successful")
-              
+
           except Exception as e:
               import traceback
               print(f"Error during conversion: {e}")
               traceback.print_exc()
               sys.exit(1)
           FREECAD_SCRIPT
-          
+
           # Function to convert STEP/STP files via FreeCAD
           convert_step_to_stl() {
             local input_file="$1"
             local output_file="$2"
             local temp_dir="$(mktemp -d)"
-            
+
             # Check if input is LFS pointer
             if is_lfs_pointer "$input_file"; then
               echo "SKIP: $input_file is a Git LFS pointer file"
               return 1
             fi
-            
+
             # Validate input file size (skip if too small, likely pointer)
             local file_size=$(stat -c%s "$input_file" 2>/dev/null || echo "0")
             if [[ $file_size -lt 100 ]]; then
               echo "SKIP: $input_file is too small ($file_size bytes), likely LFS pointer"
               return 1
             fi
-            
+
             echo "Converting STEP file: $input_file -> $output_file"
-            
+
             # Run FreeCAD conversion to STL, then Blender STL to GLB
             local freecad_success=false
-            
+
             # Try different FreeCAD execution methods
             if freecad -c /tmp/freecad_convert.py "$input_file" "${temp_dir}/temp.stl" 2>&1; then
               freecad_success=true
@@ -223,7 +221,7 @@ jobs:
             else
               echo "All FreeCAD execution methods failed"
             fi
-            
+
             if [[ "$freecad_success" == "true" ]] && [[ -f "${temp_dir}/temp.stl" ]]; then
               # Convert STL to GLB via Blender
               convert_stl_to_glb "${temp_dir}/temp.stl" "$output_file"
@@ -236,37 +234,37 @@ jobs:
               return 1
             fi
           }
-          
+
           # Function to convert STL/OBJ files via Blender
           convert_stl_to_glb() {
             local input_file="$1"
             local output_file="$2"
-            
+
             # Check if input is LFS pointer
             if is_lfs_pointer "$input_file"; then
               echo "SKIP: $input_file is a Git LFS pointer file"
               return 1
             fi
-            
+
             echo "Converting STL/OBJ file: $input_file -> $output_file"
-            
+
             # Run Blender conversion
             if blender --background --python /tmp/blender_convert.py -- "$input_file" "$output_file" 2>&1; then
-              
+
               # Optimize with gltf-transform if available
               if command -v gltf-transform >/dev/null 2>&1 && [[ -f "$output_file" ]]; then
                 echo "Optimizing GLB with gltf-transform..."
                 gltf-transform optimize "$output_file" "${output_file}.optimized" 2>/dev/null && mv "${output_file}.optimized" "$output_file" || echo "Optimization failed, keeping original"
               fi
-              
+
               return 0
             else
               return 1
             fi
           }
-          
+
           # Define specific files to download and convert from each repo
-          
+
           # System76 Virgo files
           declare -A virgo_files=(
             ["pcb-keyboard/models/CPG142501DXX v3.step"]="CPG142501DXX_v3.step"
@@ -277,8 +275,8 @@ jobs:
             ["pcb-rpl-uph/models/1003-002-01100.stp"]="1003-002-01100.stp"
             ["pcb-rpl-uph/models/PTN5110.step"]="PTN5110.step"
           )
-          
-          # ANYON_E (byrantech/laptop) files  
+
+          # ANYON_E (byrantech/laptop) files
           declare -A anyon_files=(
             ["motherboard/CM3588 3D/CM3588.stl"]="CM3588.stl"
             ["motherboard/CM3588 3D/CM3588.obj"]="CM3588.obj"
@@ -289,18 +287,18 @@ jobs:
             ["library/DF40C-100DS.stp"]="DF40C-100DS.stp"
             ["library/LPJM4938GENL.STEP"]="LPJM4938GENL.step"
           )
-          
+
           # Process System76 Virgo
           echo "=== Processing System76 Virgo ==="
           for remote_path in "${!virgo_files[@]}"; do
             local_name="${virgo_files[$remote_path]}"
             download_url="https://raw.githubusercontent.com/system76/virgo/main/${remote_path}"
             local_file="/tmp/${local_name}"
-            
+
             echo "Downloading: $download_url"
             if curl -L -f -o "$local_file" "$download_url"; then
               echo "Downloaded: $local_file"
-              
+
               # Determine output format and convert
               if [[ "$local_name" == *.step ]] || [[ "$local_name" == *.stp ]]; then
                 output_glb="public/models/virgo/${local_name%.*}.glb"
@@ -323,25 +321,25 @@ jobs:
               else
                 echo "⏭️  Skipping non-3D file: $local_name"
               fi
-              
+
               rm -f "$local_file"
             else
               echo "❌ Download failed: $download_url"
               ((failure_count++))
             fi
           done
-          
+
           # Process ANYON_E (byrantech/laptop)
           echo "=== Processing ANYON_E ==="
           for remote_path in "${!anyon_files[@]}"; do
             local_name="${anyon_files[$remote_path]}"
             download_url="https://raw.githubusercontent.com/byrantech/laptop/main/${remote_path}"
             local_file="/tmp/${local_name}"
-            
+
             echo "Downloading: $download_url"
             if curl -L -f -o "$local_file" "$download_url"; then
               echo "Downloaded: $local_file"
-              
+
               # Determine output format and convert
               if [[ "$local_name" == *.step ]] || [[ "$local_name" == *.stp ]]; then
                 output_glb="public/models/anyon_e/${local_name%.*}.glb"
@@ -364,84 +362,84 @@ jobs:
               else
                 echo "⏭️  Skipping non-3D file: $local_name"
               fi
-              
+
               rm -f "$local_file"
             else
               echo "❌ Download failed: $download_url"
               ((failure_count++))
             fi
           done
-          
+
           # Create fallback models if no conversions succeeded
           total_glb_files=$(find public/models -name "*.glb" | wc -l)
-          
+
           if [[ $total_glb_files -eq 0 ]]; then
             echo "=== Creating fallback demo models ==="
-            
+
             # Create simple demo GLB for Virgo
             cat > /tmp/create_demo_virgo.py << 'DEMO_VIRGO'
           import bpy
-          
+
           # Clear scene
           bpy.ops.object.select_all(action='SELECT')
           bpy.ops.object.delete()
-          
+
           # Create a simple laptop-like shape for Virgo
           bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
           laptop_base = bpy.context.active_object
           laptop_base.name = "Virgo_Base"
           laptop_base.scale = (3, 2, 0.1)
-          
+
           bpy.ops.mesh.primitive_cube_add(size=2, location=(0, -1.8, 0.8))
-          laptop_screen = bpy.context.active_object  
+          laptop_screen = bpy.context.active_object
           laptop_screen.name = "Virgo_Screen"
           laptop_screen.scale = (2.8, 0.1, 1.8)
           laptop_screen.rotation_euler = (0.2, 0, 0)
-          
+
           # Export as GLB
           bpy.ops.export_scene.gltf(
               filepath='public/models/virgo/demo_virgo_laptop.glb',
               export_format='GLB'
           )
           DEMO_VIRGO
-            
+
             blender --background --python /tmp/create_demo_virgo.py
-            
+
             # Create simple demo GLB for ANYON_E
             cat > /tmp/create_demo_anyon.py << 'DEMO_ANYON'
           import bpy
-          
-          # Clear scene  
+
+          # Clear scene
           bpy.ops.object.select_all(action='SELECT')
           bpy.ops.object.delete()
-          
+
           # Create motherboard-like shape
           bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
           motherboard = bpy.context.active_object
-          motherboard.name = "ANYON_E_Motherboard"  
+          motherboard.name = "ANYON_E_Motherboard"
           motherboard.scale = (4, 3, 0.05)
-          
+
           # Add some components
           bpy.ops.mesh.primitive_cube_add(size=0.3, location=(1, 1, 0.1))
           cpu = bpy.context.active_object
           cpu.name = "CPU"
-          
+
           bpy.ops.mesh.primitive_cube_add(size=0.2, location=(-1, 1, 0.1))
           ram = bpy.context.active_object
           ram.name = "RAM"
-          
+
           # Export as GLB
           bpy.ops.export_scene.gltf(
               filepath='public/models/anyon_e/demo_anyon_motherboard.glb',
               export_format='GLB'
           )
           DEMO_ANYON
-            
+
             blender --background --python /tmp/create_demo_anyon.py
-            
+
             echo "Created demo/placeholder models"
           fi
-          
+
           # Generate manifest.json
           echo "=== Generating manifest.json ==="
           cat > public/models/manifest.json << 'MANIFEST_START'
@@ -457,7 +455,7 @@ jobs:
                 "repository": "https://github.com/system76/virgo",
                 "models": [
           MANIFEST_REPOS
-          
+
           # Add Virgo models to manifest
           first_virgo=true
           for glb_file in public/models/virgo/*.glb; do
@@ -465,7 +463,7 @@ jobs:
               filename=$(basename "$glb_file")
               name="${filename%.*}"
               size=$(stat -c%s "$glb_file")
-              
+
               if [[ "$first_virgo" == "false" ]]; then
                 echo "," >> public/models/manifest.json
               fi
@@ -481,17 +479,17 @@ jobs:
               first_virgo=false
             fi
           done
-          
+
           cat >> public/models/manifest.json << 'MANIFEST_ANYON'
                 ]
               },
               "anyon_e": {
-                "name": "ANYON_E Laptop", 
+                "name": "ANYON_E Laptop",
                 "description": "Open source laptop design by byrantech",
                 "repository": "https://github.com/byrantech/laptop",
                 "models": [
           MANIFEST_ANYON
-          
+
           # Add ANYON_E models to manifest
           first_anyon=true
           for glb_file in public/models/anyon_e/*.glb; do
@@ -499,14 +497,14 @@ jobs:
               filename=$(basename "$glb_file")
               name="${filename%.*}"
               size=$(stat -c%s "$glb_file")
-              
+
               if [[ "$first_anyon" == "false" ]]; then
                 echo "," >> public/models/manifest.json
               fi
               cat >> public/models/manifest.json << MODEL_ENTRY
                   {
                     "id": "${name}",
-                    "name": "${name}", 
+                    "name": "${name}",
                     "file": "anyon_e/${filename}",
                     "size": ${size},
                     "type": "PCB/Component"
@@ -515,14 +513,14 @@ jobs:
               first_anyon=false
             fi
           done
-          
+
           cat >> public/models/manifest.json << 'MANIFEST_END'
                 ]
               }
             },
             "stats": {
           MANIFEST_END
-          
+
           total_models=$(find public/models -name "*.glb" | wc -l)
           cat >> public/models/manifest.json << MANIFEST_STATS
               "totalModels": ${total_models},
@@ -531,7 +529,7 @@ jobs:
             }
           }
           MANIFEST_STATS
-          
+
           echo "=== CONVERSION SUMMARY ==="
           echo "Successful conversions: $success_count"
           echo "Failed conversions: $failure_count"
@@ -541,18 +539,18 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
+
           git add public/models/
-          
+
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
             git commit -m "Update 3D models and manifest
-          
+
           - Processed models from system76/virgo and byrantech/laptop
           - Generated GLB files for web viewing
           - Updated manifest.json with model metadata"
-          
+
             git push
           fi
 
@@ -566,7 +564,7 @@ jobs:
           find public/models/anyon_e -name "*.glb" -exec basename {} \; | sort || echo "None found"
           echo ""
           echo "Total GLB files: $(find public/models -name "*.glb" | wc -l)"
-          
+
           echo ""
           echo "=== FILE SIZES ==="
           find public/models -name "*.glb" -exec ls -lh {} \; || echo "No files to show"
